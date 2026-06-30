@@ -273,9 +273,11 @@ def full_ict_analysis(symbol):
     if not dfs:
         return None, "Gagal mengambil data. Periksa koneksi atau coba pair lain."
     
-    # Bias dari Daily atau H4
-    bias_df = dfs.get("1d") or dfs.get("4h")
-    if bias_df is None or (hasattr(bias_df, 'empty') and bias_df.empty):
+    # Bias
+    bias_df = dfs.get("1d")
+    if bias_df is None or (isinstance(bias_df, pd.DataFrame) and bias_df.empty):
+        bias_df = dfs.get("4h")
+    if bias_df is None or (isinstance(bias_df, pd.DataFrame) and bias_df.empty):
         return None, "Data timeframe tinggi tidak tersedia."
     if len(bias_df) < 10:
         return None, "Data timeframe tinggi tidak cukup."
@@ -293,9 +295,11 @@ def full_ict_analysis(symbol):
         else:
             bias = "BUY" if bias_df["Close"].iloc[-1] > bias_df["Close"].iloc[0] else "SELL"
     
-    # Zona dari H4 atau H1
-    zone_df = dfs.get("4h") or dfs.get("1h") or bias_df
-    if zone_df is None or len(zone_df) < 5:
+    # Zona
+    zone_df = dfs.get("4h")
+    if zone_df is None or (isinstance(zone_df, pd.DataFrame) and zone_df.empty):
+        zone_df = dfs.get("1h")
+    if zone_df is None or (isinstance(zone_df, pd.DataFrame) and zone_df.empty):
         zone_df = bias_df
     
     sh_z, sl_z = find_swings(zone_df, 2)
@@ -315,9 +319,13 @@ def full_ict_analysis(symbol):
         else:
             zones.append({"type": "supply_fvg", "high": fvg_z["top"], "low": fvg_z["bottom"]})
     
-    # Entry: M15 > M5 > H1
-    entry_df = dfs.get("15m") or dfs.get("5m") or dfs.get("1h")
-    if entry_df is None or len(entry_df) < 5:
+    # Entry
+    entry_df = dfs.get("15m")
+    if entry_df is None or (isinstance(entry_df, pd.DataFrame) and entry_df.empty):
+        entry_df = dfs.get("5m")
+    if entry_df is None or (isinstance(entry_df, pd.DataFrame) and entry_df.empty):
+        entry_df = dfs.get("1h")
+    if entry_df is None or (isinstance(entry_df, pd.DataFrame) and entry_df.empty):
         return None, "Data timeframe rendah tidak tersedia."
     
     sh_e, sl_e = find_swings(entry_df, 1)
