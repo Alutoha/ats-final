@@ -271,7 +271,6 @@ def price_action_signal(df):
 def full_ict_analysis(symbol):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
-        # Fallback agresif
         return {
             "signal": "BUY",
             "entry": 2650,
@@ -286,7 +285,7 @@ def full_ict_analysis(symbol):
 
     # ----- BIAS HARIAN -----
     daily_df = dfs.get("1d")
-    if daily_df is not None and len(daily_df) >= 10:
+    if daily_df is not None and not daily_df.empty and len(daily_df) >= 10:
         sh, sl = find_swings(daily_df, 2)
         bull, bear = detect_bos(daily_df, sh, sl)
         if bull:
@@ -298,19 +297,23 @@ def full_ict_analysis(symbol):
         daily_high = daily_df["High"].iloc[-1]
         daily_low = daily_df["Low"].iloc[-1]
     else:
-        # Fallback
         bias = "BUY"
         daily_high = 2700
         daily_low = 2600
 
-    # ----- ENTRY DARI M15 -----
-    entry_df = dfs.get("15m") or dfs.get("5m") or dfs.get("1h")
-    if entry_df is None or len(entry_df) < 5:
+    # ----- ENTRY DARI M15 / M5 / H1 (tanpa error) -----
+    entry_df = None
+    for tf in ["15m", "5m", "1h"]:
+        df_candidate = dfs.get(tf)
+        if df_candidate is not None and not df_candidate.empty and len(df_candidate) >= 5:
+            entry_df = df_candidate
+            break
+
+    if entry_df is None:
         price = 2650
         sl_distance = 10
     else:
         price = entry_df["Close"].iloc[-1]
-        # SL berdasarkan ATR 14
         atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
         if pd.isna(atr) or atr == 0:
             atr = price * 0.002
@@ -327,7 +330,7 @@ def full_ict_analysis(symbol):
         tp3 = daily_high
         if tp3 <= tp2:
             tp3 = tp2 + sl_distance * 0.5
-    else:  # SELL
+    else:
         entry = price
         stop_loss = entry + sl_distance
         tp1 = entry - sl_distance * 1.5
