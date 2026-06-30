@@ -286,29 +286,46 @@ def generate_dual_signals(symbol):
                 best_demand = zone
 
     def calc_signal(direction, zone, price):
-        if direction == "SELL":
-            entry = zone["high"]
+        if symbol == "XAUUSD":
+            distance = 10.0  # SL dan TP1
+            tp2_dist = 15.0
+            tp3_dist = 20.0
+            if direction == "SELL":
+                entry = zone["high"]
+                sl = entry + distance
+                tp1 = entry - distance
+                tp2 = entry - tp2_dist
+                tp3 = entry - tp3_dist
+                tp4 = "Open"
+            else:  # BUY
+                entry = zone["low"]
+                sl = entry - distance
+                tp1 = entry + distance
+                tp2 = entry + tp2_dist
+                tp3 = entry + tp3_dist
+                tp4 = "Open"
+        else:
+            # Default untuk pair lain: gunakan lebar zona, batasi SL maks 100 pip untuk XAUUSD diabaikan
             zone_width = zone["high"] - zone["low"]
-            if symbol == "XAUUSD" and zone_width > 1.0:
-                zone_width = 1.0
-            sl = entry + zone_width          # SL di atas entry
-            tp1 = entry - zone_width        # TP1 1:1
-            tp2 = entry - zone_width * 2    # TP2 1:2
-            tp3 = entry - zone_width * 3    # TP3 1:3
-        else:  # BUY
-            entry = zone["low"]
-            zone_width = zone["high"] - zone["low"]
-            if symbol == "XAUUSD" and zone_width > 1.0:
-                zone_width = 1.0
-            sl = entry - zone_width          # SL di bawah entry
-            tp1 = entry + zone_width        # TP1 1:1
-            tp2 = entry + zone_width * 2    # TP2 1:2
-            tp3 = entry + zone_width * 3    # TP3 1:3
-        return entry, sl, tp1, tp2, tp3
+            if direction == "SELL":
+                entry = zone["high"]
+                sl = entry + zone_width
+                tp1 = entry - zone_width
+                tp2 = entry - zone_width * 2
+                tp3 = entry - zone_width * 3
+                tp4 = "Open"
+            else:
+                entry = zone["low"]
+                sl = entry - zone_width
+                tp1 = entry + zone_width
+                tp2 = entry + zone_width * 2
+                tp3 = entry + zone_width * 3
+                tp4 = "Open"
+        return entry, sl, tp1, tp2, tp3, tp4
 
     sell_signal = None
     if best_supply:
-        entry, sl, tp1, tp2, tp3 = calc_signal("SELL", best_supply, price)
+        entry, sl, tp1, tp2, tp3, tp4 = calc_signal("SELL", best_supply, price)
         sell_signal = {
             "direction": "SELL",
             "entry": entry,
@@ -316,6 +333,7 @@ def generate_dual_signals(symbol):
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
+            "tp4": tp4,
             "zone_high": best_supply["high"],
             "zone_low": best_supply["low"],
             "reason": f"Supply zone dari order block bearish di {best_supply['high']:.2f}-{best_supply['low']:.2f}. Konfirmasi: struktur lower high, potensi distribusi.",
@@ -323,7 +341,7 @@ def generate_dual_signals(symbol):
         }
     buy_signal = None
     if best_demand:
-        entry, sl, tp1, tp2, tp3 = calc_signal("BUY", best_demand, price)
+        entry, sl, tp1, tp2, tp3, tp4 = calc_signal("BUY", best_demand, price)
         buy_signal = {
             "direction": "BUY",
             "entry": entry,
@@ -331,6 +349,7 @@ def generate_dual_signals(symbol):
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
+            "tp4": tp4,
             "zone_high": best_demand["high"],
             "zone_low": best_demand["low"],
             "reason": f"Demand zone dari order block bullish di {best_demand['high']:.2f}-{best_demand['low']:.2f}. Konfirmasi: akumulasi, pantulan valid.",
@@ -531,14 +550,16 @@ else:
         if sell_sig:
             card_class = "sell-card" + (" running" if st.session_state.sell_touched else "")
             status_text = "🔴 SELL RUNNING" if st.session_state.sell_touched else "🔴 SELL LIMIT (Pending)"
+            tp4_text = f"<p>TP4: {sell_sig['tp4']}</p>" if sell_sig['tp4'] == "Open" else f"<p>TP4: {sell_sig['tp4']:.2f}</p>"
             st.markdown(f"""
             <div class='{card_class}'>
                 <h3>{status_text}</h3>
                 <p>ENTRY: {sell_sig['entry']:.2f}</p>
-                <p>SL: {sell_sig['sl']:.2f} (di atas entry)</p>
-                <p>TP1: {sell_sig['tp1']:.2f} (1:1)</p>
-                <p>TP2: {sell_sig['tp2']:.2f} (1:2)</p>
-                <p>TP3: {sell_sig['tp3']:.2f} (1:3)</p>
+                <p>SL: {sell_sig['sl']:.2f}</p>
+                <p>TP1: {sell_sig['tp1']:.2f}</p>
+                <p>TP2: {sell_sig['tp2']:.2f}</p>
+                <p>TP3: {sell_sig['tp3']:.2f}</p>
+                {tp4_text}
                 <div class='details'><small>{sell_sig['reason']}</small></div>
             </div>""", unsafe_allow_html=True)
         else:
@@ -548,14 +569,16 @@ else:
         if buy_sig:
             card_class = "buy-card" + (" running" if st.session_state.buy_touched else "")
             status_text = "🟢 BUY RUNNING" if st.session_state.buy_touched else "🟢 BUY LIMIT (Pending)"
+            tp4_text = f"<p>TP4: {buy_sig['tp4']}</p>" if buy_sig['tp4'] == "Open" else f"<p>TP4: {buy_sig['tp4']:.2f}</p>"
             st.markdown(f"""
             <div class='{card_class}'>
                 <h3>{status_text}</h3>
                 <p>ENTRY: {buy_sig['entry']:.2f}</p>
-                <p>SL: {buy_sig['sl']:.2f} (di bawah entry)</p>
-                <p>TP1: {buy_sig['tp1']:.2f} (1:1)</p>
-                <p>TP2: {buy_sig['tp2']:.2f} (1:2)</p>
-                <p>TP3: {buy_sig['tp3']:.2f} (1:3)</p>
+                <p>SL: {buy_sig['sl']:.2f}</p>
+                <p>TP1: {buy_sig['tp1']:.2f}</p>
+                <p>TP2: {buy_sig['tp2']:.2f}</p>
+                <p>TP3: {buy_sig['tp3']:.2f}</p>
+                {tp4_text}
                 <div class='details'><small>{buy_sig['reason']}</small></div>
             </div>""", unsafe_allow_html=True)
         else:
