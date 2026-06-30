@@ -135,7 +135,7 @@ def extend_user(uid, days):
         conn.commit()
     conn.close()
 
-# ==================== SYMBOL & TIMEFRAME ====================
+# ==================== SYMBOL MAPPING ====================
 SYMBOL_MAP = {
     "XAUUSD": "GC=F", "XAGUSD": "SI=F", "USOIL": "CL=F",
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
@@ -150,33 +150,6 @@ TV_SYMBOL = {
     "AUDUSD": "OANDA:AUDUSD", "NZDUSD": "OANDA:NZDUSD", "USDCAD": "OANDA:USDCAD",
     "USDCHF": "OANDA:USDCHF", "BTCUSD": "BINANCE:BTCUSDT", "ETHUSD": "BINANCE:ETHUSDT",
     "XRPUSD": "BINANCE:XRPUSDT", "ADAUSD": "BINANCE:ADAUSDT", "SOLUSD": "BINANCE:SOLUSDT"
-}
-
-TIME_CONFIG = {
-    "Scalping": {
-        "bias_tf": "1h",
-        "zone_tf": "15m",
-        "entry_tf": "5m",
-        "tv_interval": "5",
-        "swing_strength": 1,
-        "label": "Scalping (M5)"
-    },
-    "Intraday": {
-        "bias_tf": "1d",
-        "zone_tf": "1h",
-        "entry_tf": "15m",
-        "tv_interval": "60",
-        "swing_strength": 2,
-        "label": "Intraday (1H)"
-    },
-    "Swing": {
-        "bias_tf": "1wk",
-        "zone_tf": "1d",
-        "entry_tf": "4h",
-        "tv_interval": "1D",
-        "swing_strength": 3,
-        "label": "Swing (1D)"
-    }
 }
 
 # ==================== DATA FETCHING ====================
@@ -194,29 +167,27 @@ def fetch_data(symbol, interval, period="7d"):
         return None
 
 @st.cache_data(ttl=300)
-def fetch_data_multi(symbol, tf_list):
+def fetch_all_timeframes(symbol):
+    """Ambil data semua timeframe yang diperlukan, resample jika perlu."""
     result = {}
-    for tf in tf_list:
-        if tf == "1wk":
-            df = fetch_data(symbol, "1wk", "6mo")
-        elif tf == "1d":
-            df = fetch_data(symbol, "1d", "3mo")
-        elif tf == "4h":
-            df = fetch_data(symbol, "1h", "1mo")
-            if df is not None:
-                df = df.resample("4h").agg({
-                    "Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"
-                }).dropna()
-        elif tf == "1h":
-            df = fetch_data(symbol, "1h", "1mo")
-        elif tf == "15m":
-            df = fetch_data(symbol, "15m", "60d")
-        elif tf == "5m":
-            df = fetch_data(symbol, "5m", "60d")
-        else:
-            df = None
-        if df is not None and not df.empty:
-            result[tf] = df
+    # Weekly
+    df = fetch_data(symbol, "1wk", "6mo")
+    if df is not None: result["1wk"] = df
+    # Daily
+    df = fetch_data(symbol, "1d", "3mo")
+    if df is not None: result["1d"] = df
+    # H4 (resample dari 1h)
+    df = fetch_data(symbol, "1h", "1mo")
+    if df is not None:
+        df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+        result["4h"] = df_h4
+        result["1h"] = df  # simpan juga 1h
+    # M15
+    df = fetch_data(symbol, "15m", "60d")
+    if df is not None: result["15m"] = df
+    # M5
+    df = fetch_data(symbol, "5m", "60d")
+    if df is not None: result["5m"] = df
     return result
 
 # ==================== TECHNICAL FUNCTIONS ====================
@@ -257,7 +228,7 @@ def find_fvg(df):
         return {"top": prev2["Low"], "bottom": last["High"], "type": "bearish"}
     return None
 
-def find_liquidity_sweep(df, sh, sl, tf):
+def find_liquidity_sweep(df, sh, sl):
     if len(sh) < 1 or len(sl) < 1:
         return None
     last_sl = sl[-1]
@@ -270,44 +241,6 @@ def find_liquidity_sweep(df, sh, sl, tf):
         sweep_high = df['High'].iloc[-5:].max()
         if sweep_high > df['High'].iloc[last_sh] and df['Close'].iloc[-1] < df['High'].iloc[last_sh]:
             return ('sell', last_sh)
-    return None
-
-def detect_cisd(df, sh, sl, tf):
-    required = 3 if tf == 'Swing' else 2
-    if len(sh) >= required and len(sl) >= required:
-        prev_sh = df['High'].iloc[sh[-2]]
-        prev_sl = df['Low'].iloc[sl[-2]]
-        curr_sh = df['High'].iloc[sh[-1]]
-        curr_sl = df['Low'].iloc[sl[-1]]
-        if curr_sl > prev_sl and curr_sh > prev_sh:
-            return 'bullish'
-        elif curr_sh < prev_sh and curr_sl < prev_sl:
-            return 'bearish'
-    return None
-
-def find_ifvg(df):
-    fvg = find_fvg(df)
-    if fvg is None or len(df) < 4:
-        return None
-    if fvg['type'] == 'bullish':
-        recent = df.iloc[-2:]
-        if recent['Low'].min() <= fvg['top'] and recent['Close'].iloc[-1] < recent['Open'].iloc[-1]:
-            return {'type': 'bearish_ifvg', 'top': fvg['top'], 'bottom': fvg['bottom']}
-    elif fvg['type'] == 'bearish':
-        recent = df.iloc[-2:]
-        if recent['High'].max() >= fvg['bottom'] and recent['Close'].iloc[-1] > recent['Open'].iloc[-1]:
-            return {'type': 'bullish_ifvg', 'top': fvg['top'], 'bottom': fvg['bottom']}
-    return None
-
-def find_bpr(df, sh, sl):
-    if not sh or not sl:
-        return None
-    last_swing_idx = max(sh[-1], sl[-1])
-    if last_swing_idx + 5 >= len(df):
-        return None
-    recent = df.iloc[last_swing_idx:last_swing_idx+5]
-    if recent['High'].max() - recent['Low'].min() < (df['Close'].iloc[-1] * 0.008):
-        return {'high': recent['High'].max(), 'low': recent['Low'].min()}
     return None
 
 def price_action_signal(df):
@@ -335,41 +268,35 @@ def price_action_signal(df):
             return "SELL", "Inside Bar (Bearish Cont.)"
     return None, None
 
-# ==================== MULTI-TIMEFRAME ANALISIS ====================
-def ict_analysis_mtf(symbol, mode="Intraday"):
-    config = TIME_CONFIG[mode]
-    tf_list = list(set([config["bias_tf"], config["zone_tf"], config["entry_tf"]]))
-    dfs = fetch_data_multi(symbol, tf_list)
+# ==================== ANALISIS GABUNGAN ====================
+def full_ict_analysis(symbol):
+    dfs = fetch_all_timeframes(symbol)
+    if not dfs:
+        return None, "Gagal mengambil data dari Yahoo Finance."
     
-    bias_df = dfs.get(config["bias_tf"])
-    zone_df = dfs.get(config["zone_tf"])
-    entry_df = dfs.get(config["entry_tf"])
+    # Tentukan bias dari Weekly atau Daily (yang tersedia)
+    bias_df = dfs.get("1wk") or dfs.get("1d")
+    if bias_df is None or len(bias_df) < 5:
+        return None, "Data timeframe tinggi tidak cukup."
     
-    if bias_df is None or zone_df is None or entry_df is None:
-        return None, "Data untuk salah satu timeframe tidak tersedia."
-    if len(bias_df) < 5 or len(zone_df) < 5 or len(entry_df) < 5:
-        return None, "Data tidak cukup untuk analisis multi-timeframe."
-    
-    strength_bias = 2 if mode != "Scalping" else 1
-    sh_b, sl_b = find_swings(bias_df, strength_bias)
-    bull_bias, bear_bias = detect_bos(bias_df, sh_b, sl_b)
-    bias = None
-    if bull_bias and not bear_bias:
+    sh_b, sl_b = find_swings(bias_df, 3)
+    bull, bear = detect_bos(bias_df, sh_b, sl_b)
+    if bull and not bear:
         bias = "BUY"
-    elif bear_bias and not bull_bias:
+    elif bear and not bull:
         bias = "SELL"
     else:
-        if len(sh_b) >= 2 and len(sl_b) >= 2:
-            if bias_df["High"].iloc[sh_b[-1]] > bias_df["High"].iloc[sh_b[-2]]:
-                bias = "BUY"
-            elif bias_df["Low"].iloc[sl_b[-1]] < bias_df["Low"].iloc[sl_b[-2]]:
-                bias = "SELL"
-        if bias is None:
+        # Fallback tren
+        if len(bias_df) >= 20:
             sma20 = bias_df["Close"].rolling(20).mean().iloc[-1]
-            if bias_df["Close"].iloc[-1] > sma20:
-                bias = "BUY"
-            else:
-                bias = "SELL"
+            bias = "BUY" if bias_df["Close"].iloc[-1] > sma20 else "SELL"
+        else:
+            bias = "SELL" if bias_df["Close"].iloc[-1] < bias_df["Close"].iloc[0] else "BUY"
+    
+    # Zona dari H4 (atau H1 sebagai cadangan)
+    zone_df = dfs.get("4h") or dfs.get("1h")
+    if zone_df is None:
+        zone_df = bias_df  # fallback
     
     sh_z, sl_z = find_swings(zone_df, 2)
     zones = []
@@ -388,18 +315,19 @@ def ict_analysis_mtf(symbol, mode="Intraday"):
         else:
             zones.append({"type": "supply_fvg", "high": fvg_z["top"], "low": fvg_z["bottom"]})
     
+    # Entry dari M15 (prioritas) atau M5
+    entry_df = dfs.get("15m") or dfs.get("5m")
+    if entry_df is None:
+        return None, "Data timeframe rendah tidak tersedia."
+    
     sh_e, sl_e = find_swings(entry_df, 1)
-    sweep = find_liquidity_sweep(entry_df, sh_e, sl_e, mode)
-    ifvg_e = find_ifvg(entry_df)
-    bpr_e = find_bpr(entry_df, sh_e, sl_e)
+    sweep = find_liquidity_sweep(entry_df, sh_e, sl_e)
     pa_sig, pa_desc = price_action_signal(entry_df)
     
     price = entry_df["Close"].iloc[-1]
     signal = None
     reasons = []
-    entry_price = sl_price = tp1 = tp2 = None
-    confidence = "C"
-    risk_level = "Medium"
+    entry_price = sl_price = None
     
     def near_zone(price, zone, threshold=0.008):
         return abs(price - zone["low"]) / price < threshold or abs(price - zone["high"]) / price < threshold
@@ -408,107 +336,62 @@ def ict_analysis_mtf(symbol, mode="Intraday"):
     
     if bias == "BUY":
         if sweep and sweep[0] == 'buy':
-            if ifvg_e and ifvg_e['type'] == 'bullish_ifvg':
-                entry_price = ifvg_e['bottom'] if ifvg_e['bottom'] > price else price
-                sl_price = entry_df["Low"].iloc[sweep[1]]
-                reasons = [f"✅ Bias {config['bias_tf']}: Bullish", "✅ Sweep + iFVG Bullish"]
-                tp1 = price + (price - sl_price) * 1.2
-                tp2 = price + (price - sl_price) * 2
-                signal = "BUY"
-                confidence = "A+"
-                risk_level = "Low"
-            elif bpr_e:
-                entry_price = bpr_e['high'] + 0.01
-                sl_price = bpr_e['low'] - 0.01
-                reasons = ["✅ Bias Bullish", "✅ Sweep + BPR support"]
-                tp1 = price + (price - sl_price) * 1.5
-                tp2 = price + (price - sl_price) * 3
-                signal = "BUY"
-                confidence = "A"
-                risk_level = "Low"
-        if not signal and valid_zones and pa_sig == "BUY":
+            entry_price = price
+            sl_price = entry_df["Low"].iloc[sweep[1]] - 0.01
+            reasons = ["✅ Bias Higher TF: Bullish", "✅ Liquidity Sweep buy"]
+            signal = "BUY"
+        elif valid_zones and pa_sig == "BUY":
             for zone in valid_zones:
                 if near_zone(price, zone):
                     entry_price = zone["high"] + 0.01
                     sl_price = zone["low"] - 0.01
-                    tp1 = price + (price - sl_price) * 1.5
-                    tp2 = price + (price - sl_price) * 3
+                    reasons = [f"✅ Bias Bullish", f"✅ {pa_desc} di Demand Zone"]
                     signal = "BUY"
-                    reasons = [f"✅ Bias Bullish", f"✅ {pa_desc} di Demand Zone", "✅ Zona valid"]
-                    confidence = "A"
-                    risk_level = "Low"
                     break
         if not signal and pa_sig == "BUY":
-            entry_price = entry_df["High"].iloc[-1] + 0.01
-            sl_price = entry_df["Low"].iloc[-1] - 0.01
-            tp1 = price + (price - sl_price) * 1.5
-            tp2 = price + (price - sl_price) * 3
+            entry_price = price
+            sl_price = entry_df["Low"].iloc[-1] - 0.5
+            reasons = [f"✅ Bias Bullish", f"✅ {pa_desc}"]
             signal = "BUY"
-            reasons = [f"✅ Bias Bullish", f"✅ {pa_desc} (Price Action)", "⚠️ Tanpa zona HTF"]
-            confidence = "B"
-            risk_level = "Medium"
-            
-    elif bias == "SELL":
+    else:  # SELL
         if sweep and sweep[0] == 'sell':
-            if ifvg_e and ifvg_e['type'] == 'bearish_ifvg':
-                entry_price = ifvg_e['top'] if ifvg_e['top'] < price else price
-                sl_price = entry_df["High"].iloc[sweep[1]]
-                reasons = ["✅ Bias Bearish", "✅ Sweep + iFVG Bearish"]
-                tp1 = price - (sl_price - price) * 1.2
-                tp2 = price - (sl_price - price) * 2
-                signal = "SELL"
-                confidence = "A+"
-                risk_level = "Low"
-            elif bpr_e:
-                entry_price = bpr_e['low'] - 0.01
-                sl_price = bpr_e['high'] + 0.01
-                reasons = ["✅ Bias Bearish", "✅ Sweep + BPR resistance"]
-                tp1 = price - (sl_price - price) * 1.5
-                tp2 = price - (sl_price - price) * 3
-                signal = "SELL"
-                confidence = "A"
-                risk_level = "Low"
-        if not signal and valid_zones and pa_sig == "SELL":
+            entry_price = price
+            sl_price = entry_df["High"].iloc[sweep[1]] + 0.01
+            reasons = ["✅ Bias Higher TF: Bearish", "✅ Liquidity Sweep sell"]
+            signal = "SELL"
+        elif valid_zones and pa_sig == "SELL":
             for zone in valid_zones:
                 if near_zone(price, zone):
                     entry_price = zone["low"] - 0.01
                     sl_price = zone["high"] + 0.01
-                    tp1 = price - (sl_price - price) * 1.5
-                    tp2 = price - (sl_price - price) * 3
+                    reasons = [f"✅ Bias Bearish", f"✅ {pa_desc} di Supply Zone"]
                     signal = "SELL"
-                    reasons = [f"✅ Bias Bearish", f"✅ {pa_desc} di Supply Zone", "✅ Zona valid"]
-                    confidence = "A"
-                    risk_level = "Low"
                     break
         if not signal and pa_sig == "SELL":
-            entry_price = entry_df["Low"].iloc[-1] - 0.01
-            sl_price = entry_df["High"].iloc[-1] + 0.01
-            tp1 = price - (sl_price - price) * 1.5
-            tp2 = price - (sl_price - price) * 3
+            entry_price = price
+            sl_price = entry_df["High"].iloc[-1] + 0.5
+            reasons = [f"✅ Bias Bearish", f"✅ {pa_desc}"]
             signal = "SELL"
-            reasons = [f"✅ Bias Bearish", f"✅ {pa_desc} (Price Action)", "⚠️ Tanpa zona HTF"]
-            confidence = "B"
-            risk_level = "Medium"
     
-    if signal:
-        return {
-            "signal": signal,
-            "entry": entry_price,
-            "sl": sl_price,
-            "tp1": tp1,
-            "tp2": tp2,
-            "reasons": reasons,
-            "price": price,
-            "mode": mode,
-            "confidence": confidence,
-            "risk_level": risk_level,
-            "bias": bias,
-            "bias_tf": config["bias_tf"],
-            "zone_tf": config["zone_tf"],
-            "entry_tf": config["entry_tf"]
-        }, None
-    else:
-        return None, "Tidak ada setup valid di multi-timeframe."
+    if not signal:
+        return None, "Tidak ada setup valid."
+    
+    # Hitung TP berdasarkan jarak SL
+    risk = abs(entry_price - sl_price)
+    tp1 = entry_price + risk * 1.5 if signal == "BUY" else entry_price - risk * 1.5
+    tp2 = entry_price + risk * 3   if signal == "BUY" else entry_price - risk * 3
+    tp3 = entry_price + risk * 5   if signal == "BUY" else entry_price - risk * 5
+    
+    return {
+        "signal": signal,
+        "entry": entry_price,
+        "sl": sl_price,
+        "tp1": tp1,   # scalping
+        "tp2": tp2,   # intraday
+        "tp3": tp3,   # swing
+        "reasons": reasons,
+        "price": price
+    }, None
 
 # ==================== SESSION STATE ====================
 if "logged_in" not in st.session_state:
@@ -517,13 +400,11 @@ if "logged_in" not in st.session_state:
     st.session_state.nama = None
     st.session_state.page = "analisa"
     st.session_state.result = None
-    st.session_state.tf = "Intraday"
-    st.session_state.lang = "id"
 
 st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
 init_db()
 
-# CSS + Jam Real-time
+# CSS
 st.markdown("""
 <style>
 .stApp {background:#0E1117}
@@ -534,26 +415,7 @@ st.markdown("""
 .details {background:#1a1a2e;border-radius:15px;padding:20px;margin:15px 0;text-align:left}
 .details p {font-size:18px;color:#e0e0e0}
 .stButton>button {border-radius:12px;font-weight:bold;padding:12px 24px}
-#live-clock {color:#888; font-size:16px; text-align:right;}
 </style>
-
-<div id="live-clock" style="text-align:right; padding:5px;"></div>
-<script>
-function updateClock() {
-    var now = new Date();
-    var options = { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
-    var timeString = now.toLocaleTimeString('id-ID', options);
-    var session = "";
-    var hour = now.getHours();
-    if (hour >= 7 && hour < 15) session = "🇯🇵 Asia (Tokyo)";
-    else if (hour >= 15 && hour < 20) session = "🇬🇧 London";
-    else if (hour >= 20 && hour < 23) session = "🇺🇸 New York (Early)";
-    else session = "🇺🇸 New York (Late) / Closed";
-    document.getElementById('live-clock').innerHTML = "🕒 " + timeString + " WIB<br>" + session;
-}
-updateClock();
-setInterval(updateClock, 1000);
-</script>
 """, unsafe_allow_html=True)
 
 # ==================== LOGIN PAGE ====================
@@ -648,10 +510,29 @@ elif st.session_state.role == "admin":
 
 # ==================== USER DASHBOARD ====================
 else:
+    # Sidebar
     with st.sidebar:
         st.markdown(f"<h3 style='color:#00ff88;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
-        lang = st.selectbox("Bahasa / Language", ["🇮🇩 Indonesia", "🇬🇧 English"], index=0)
-        st.session_state.lang = "id" if "Indonesia" in lang else "en"
+        # Jam real-time
+        components.html("""
+        <div id="live-clock" style="color:#cccccc; font-size:16px; margin-bottom:10px;"></div>
+        <script>
+        function updateClock() {
+            var now = new Date();
+            var options = { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+            var timeString = now.toLocaleTimeString('en-US', options);
+            var session = "";
+            var hour = now.getHours();
+            if (hour >= 7 && hour < 15) session = "Asia (Tokyo)";
+            else if (hour >= 15 && hour < 20) session = "London";
+            else if (hour >= 20 && hour < 23) session = "New York (Early)";
+            else session = "New York (Late)";
+            document.getElementById('live-clock').innerHTML = "🕒 " + timeString + " WIB<br>🇯🇵 " + session;
+        }
+        updateClock();
+        setInterval(updateClock, 1000);
+        </script>
+        """, height=60)
         
         st.markdown(f"<p style='color:#888;'>{datetime.now().strftime('%A, %d %B %Y')}</p>", unsafe_allow_html=True)
         if st.button("📊 ANALISA", use_container_width=True):
@@ -673,15 +554,12 @@ else:
             st.session_state.logged_in = False
             st.rerun()
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
-    with col2:
-        st.markdown("<p style='text-align:right; color:#888;'>Jam & Sesi di atas (real-time)</p>", unsafe_allow_html=True)
-    
+    # Header
+    st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
     
+    # Pilih Pair
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -691,41 +569,18 @@ else:
         pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
     pair = st.selectbox("Pair", pairs)
 
-    st.markdown("**Mode Analisa:**")
-    cols_tf = st.columns(3)
-    tf_options = ["Scalping", "Intraday", "Swing"]
-    for i, tf in enumerate(tf_options):
-        with cols_tf[i]:
-            if st.button(TIME_CONFIG[tf]["label"], use_container_width=True, key=f"tf_{tf}"):
-                st.session_state.tf = tf
-                st.rerun()
-    current_tf = st.session_state.tf
-    st.caption(f"Mode: {TIME_CONFIG[current_tf]['label']}")
-
     if st.session_state.page == "analisa":
-        config = TIME_CONFIG[current_tf]
-        entry_df = fetch_data(pair, config["entry_tf"], "60d")
-        if entry_df is not None:
-            harga = entry_df["Close"].iloc[-1]
-            prev = entry_df["Close"].iloc[-2] if len(entry_df)>1 else harga
-            ch = harga - prev
-            chp = (ch/prev)*100 if prev != 0 else 0
-            warna = "#00ff88" if ch>=0 else "#ff4444"
-            st.markdown(f"<h1 style='color:{warna}'>{harga:.2f} <span style='font-size:20px'>{'▲' if ch>=0 else '▼'} {ch:.2f} ({chp:.2f}%)</span></h1>", unsafe_allow_html=True)
-        else:
-            st.warning("Gagal memuat data harga.")
-        
-        tv_interval = config["tv_interval"]
+        # Chart TradingView 15 menit
         tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
         tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
         <script src="https://s3.tradingview.com/tv.js"></script>
-        <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"{tv_interval}","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
+        <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
         components.html(tv, height=520)
         
         st.markdown("---")
-        if st.button("🔍 ANALISA SMC/ICT", use_container_width=True):
-            with st.spinner("Menganalisa multi-timeframe..."):
-                res, err = ict_analysis_mtf(pair, current_tf)
+        if st.button("🔍 ANALISA SEKARANG", use_container_width=True):
+            with st.spinner("Menganalisa semua timeframe..."):
+                res, err = full_ict_analysis(pair)
             if err:
                 st.error(err)
             else:
@@ -733,7 +588,7 @@ else:
                 st.session_state.page = "sinyal"
                 st.rerun()
 
-    else:
+    else:  # Halaman Sinyal
         if st.button("⬅️ Kembali ke Chart"):
             st.session_state.page = "analisa"
             st.rerun()
@@ -742,35 +597,18 @@ else:
             sig = res["signal"]
             cls = "signal-buy" if sig=="BUY" else "signal-sell"
             emj = "🟢" if sig=="BUY" else "🔴"
-            st.markdown(f"<div class='{cls}'><p>📈 SINYAL ICT + PA</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair} · {res['mode']} (MTF)</p></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='{cls}'><p>📈 SINYAL ICT MULTI-TF</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
             
-            st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p><p>🎯 TP1 : {res['tp1']:.2f}</p><p>🎯 TP2 : {res['tp2']:.2f}</p></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p>"
+                        f"<p>🎯 TP1 (Scalping) : {res['tp1']:.2f}</p><p>🎯 TP2 (Intraday) : {res['tp2']:.2f}</p>"
+                        f"<p>🎯 TP3 (Swing) : {res['tp3']:.2f}</p></div>", unsafe_allow_html=True)
             
             st.markdown("### 📝 Alasan Entry")
             st.markdown(f"<div style='background:#1a1a2e;border-radius:15px;padding:20px;color:#ccc'><ul>{''.join(f'<li>{r}</li>' for r in res['reasons'])}</ul></div>", unsafe_allow_html=True)
-            
-            st.markdown("### 🔬 Analisa Mendalam (Kondisi Market)")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Setup Confidence", res['confidence'])
-            with col2:
-                st.metric("Risk Level", res['risk_level'])
-            with col3:
-                st.metric("Bias HTF", f"{res['bias']} ({res['bias_tf']})")
-            
-            deskripsi = f"""
-            <div style='background:#1a1a2e; border-radius:15px; padding:20px; color:#ccc; margin-top:10px;'>
-                <p><b>Struktur Market:</b> Bias {res['bias']} dari {res['bias_tf']} menunjukkan potensi kelanjutan tren. 
-                Zona dari {res['zone_tf']} telah teridentifikasi sebagai area kunci. 
-                Entry diambil dari {res['entry_tf']} setelah konfirmasi sinyal.</p>
-                <p><b>Level Risiko:</b> {res['risk_level']} - {'Setup dengan konfirmasi kuat (A/A+) cenderung memiliki probabilitas tinggi.' if res['risk_level']=='Low' else 'Perlu waspada, konfirmasi tidak maksimal.'}</p>
-                <p><b>Rencana:</b> Target TP1 dan TP2 sesuai risk-reward. Jika harga menembus zona, bisa trailing stop.</p>
-            </div>
-            """
-            st.markdown(deskripsi, unsafe_allow_html=True)
         else:
-            st.info("Klik ANALISA SMC/ICT di halaman Chart")
+            st.info("Klik ANALISA SEKARANG di halaman Chart")
         
+    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
