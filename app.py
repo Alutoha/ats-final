@@ -1,229 +1,575 @@
-from flask import Flask, request, render_template_string
+import streamlit as st
+import streamlit.components.v1 as components
+import sqlite3
+import hashlib
+import os
+import random
+import string
+from datetime import datetime, timedelta
+import pytz
+import yfinance as yf
+import pandas as pd
+import numpy as np
 
-app = Flask(__name__)
+# ==================== PASSWORD HASHING ====================
+def hash_password(password):
+    salt = os.urandom(32)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return salt + key
 
-# ============ HTML TEMPLATE ============
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Trading Signal Dashboard - TP2 Otomatis</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #1e1e2f; color: #eee; padding: 30px; }
-        .container { max-width: 1000px; margin: 0 auto; background: #2a2a3e; padding: 30px; border-radius: 16px; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
-        h1 { text-align: center; color: #f0c040; }
-        .row { display: flex; flex-wrap: wrap; gap: 15px; }
-        .col { flex: 1; min-width: 200px; }
-        label { display: block; font-weight: bold; margin-top: 12px; color: #aab; }
-        input, select { width: 100%; padding: 10px; border-radius: 8px; border: none; background: #3a3a52; color: #fff; }
-        button { background: #f0c040; color: #1e1e2f; font-weight: bold; padding: 14px 30px; border: none; border-radius: 10px; margin-top: 25px; cursor: pointer; width: 100%; font-size: 18px; }
-        button:hover { background: #f5d060; }
-        .result { margin-top: 30px; background: #22223a; padding: 20px; border-radius: 12px; border-left: 6px solid #f0c040; white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 14px; line-height: 1.6; }
-        .badge { color: #f0c040; font-weight: bold; }
-        .note { color: #888; font-size: 13px; margin-top: 5px; }
-        hr { border-color: #444; }
-        .info-box { background: #1a1a2e; padding: 10px 15px; border-radius: 8px; border-left: 4px solid #f0c040; margin-top: 10px; color: #ccc; }
-    </style>
-</head>
-<body>
-<div class="container">
-    <h1>📊 Analisa & Sinyal (TP2 Otomatis 1:2 ~ 1:2.5)</h1>
-    <form method="POST">
-        <div class="row">
-            <div class="col">
-                <label>Symbol</label>
-                <select name="symbol">
-                    <option value="XAUUSD" {{ 'selected' if data.symbol=='XAUUSD' else '' }}>XAUUSD (Gold)</option>
-                    <option value="EURUSD" {{ 'selected' if data.symbol=='EURUSD' else '' }}>EURUSD</option>
-                    <option value="GBPUSD" {{ 'selected' if data.symbol=='GBPUSD' else '' }}>GBPUSD</option>
-                    <option value="USDJPY" {{ 'selected' if data.symbol=='USDJPY' else '' }}>USDJPY</option>
-                </select>
-            </div>
-            <div class="col">
-                <label>Arah Entry</label>
-                <select name="direction">
-                    <option value="BUY" {{ 'selected' if data.direction=='BUY' else '' }}>BUY</option>
-                    <option value="SELL" {{ 'selected' if data.direction=='SELL' else '' }}>SELL</option>
-                </select>
-            </div>
-        </div>
-        <div class="row">
-            <div class="col"><label>Harga Saat Ini (Entry)</label><input type="number" step="any" name="price" value="{{ data.price }}"></div>
-            <div class="col"><label>ATR (Average True Range)</label><input type="number" step="any" name="atr" value="{{ data.atr }}"></div>
-        </div>
-        <div class="row">
-            <div class="col"><label>Daily High</label><input type="number" step="any" name="daily_high" value="{{ data.daily_high }}"></div>
-            <div class="col"><label>Daily Low</label><input type="number" step="any" name="daily_low" value="{{ data.daily_low }}"></div>
-        </div>
-        <div class="row">
-            <div class="col"><label>Last Swing High (untuk SELL)</label><input type="number" step="any" name="swing_high" value="{{ data.swing_high }}"></div>
-            <div class="col"><label>Last Swing Low (untuk BUY)</label><input type="number" step="any" name="swing_low" value="{{ data.swing_low }}"></div>
-        </div>
-        <div class="row">
-            <div class="col"><label>Trend</label><input type="text" name="trend" value="{{ data.trend }}" placeholder="ex: Uptrend / Downtrend"></div>
-            <div class="col"><label>Momentum</label><input type="text" name="momentum" value="{{ data.momentum }}" placeholder="ex: Konsolidasi, Strong Breakout"></div>
-        </div>
-        <div class="col">
-            <label>Zona Kunci (Supply/Demand / S/R)</label>
-            <input type="text" name="key_zone" value="{{ data.key_zone }}" placeholder="ex: Order Block 2645 - 2655">
-        </div>
-        
-        <!-- Info otomatis -->
-        <div class="info-box">
-            ⚡ <strong>TP2 Otomatis</strong>: Sistem akan menghitung RR antara 1:2.0 hingga 1:2.5 berdasarkan ruang menuju Daily High/Low (TP3). 
-            Jika ruang cukup, RR mendekati 2.5; jika terbatas, RR mendekati 2.0.
-        </div>
+def check_password(password, hashed):
+    salt = hashed[:32]
+    key = hashed[32:]
+    new_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return new_key == key
 
-        <button type="submit">🚀 Generate Analisa & Sinyal</button>
-    </form>
+# ==================== DATABASE SETUP ====================
+def init_db():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nama TEXT, email TEXT,
+        username TEXT UNIQUE, password_hash BLOB,
+        expired_date TEXT, status TEXT DEFAULT 'aktif',
+        is_trial INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS admins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE, password_hash BLOB)''')
+    c.execute("SELECT * FROM admins WHERE username='admin'")
+    if not c.fetchone():
+        hashed = hash_password("admin123")
+        c.execute("INSERT INTO admins (username, password_hash) VALUES (?,?)", ("admin", hashed))
+    conn.commit()
+    conn.close()
 
-    {% if result %}
-    <div class="result">{{ result }}</div>
-    {% endif %}
-</div>
-</body>
-</html>
-"""
+def get_conn():
+    return sqlite3.connect("users.db")
 
-# ============ LOGIKA SIGNAL (TP2 OTOMATIS) ============
-def generate_signal(symbol, price, atr, daily_high, daily_low, swing_high, swing_low,
-                    trend, momentum, key_zone, direction="BUY"):
+def verify_admin(u, p):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT password_hash FROM admins WHERE username=?", (u,))
+    row = c.fetchone()
+    conn.close()
+    return row and check_password(p, row[0])
 
-    # ----- 1. Hitung jarak SL -----
-    base_sl = atr * 1.5
+def change_admin_password(old_pw, new_pw):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT password_hash FROM admins WHERE username='admin'")
+    row = c.fetchone()
+    if row and check_password(old_pw, row[0]):
+        hashed = hash_password(new_pw)
+        c.execute("UPDATE admins SET password_hash=? WHERE username='admin'", (hashed,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
 
-    if symbol == "XAUUSD":
-        if direction == "BUY":
-            dist_to_swing = abs(price - swing_low)
+def verify_user(u, p):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT password_hash, expired_date, status, nama FROM users WHERE username=?", (u,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None, "Username tidak ditemukan"
+    if row[2] != 'aktif':
+        return None, "Akun dinonaktifkan"
+    if not check_password(p, row[0]):
+        return None, "Password salah"
+    expired = datetime.strptime(row[1], "%Y-%m-%d")
+    if expired < datetime.now():
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("UPDATE users SET status='expired' WHERE username=?", (u,))
+        conn.commit()
+        conn.close()
+        return None, "Akun expired"
+    return row[3], None
+
+def generate_user(nama, email, days, is_trial=0):
+    angka = ''.join(random.choices(string.digits, k=4))
+    username = f"USER-{nama.upper()}{angka}"
+    pw = ''.join(random.choices(string.ascii_letters + string.digits + "#@!", k=10))
+    hashed = hash_password(pw)
+    exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (nama,email,username,password_hash,expired_date,is_trial) VALUES (?,?,?,?,?,?)",
+                  (nama, email, username, hashed, exp, is_trial))
+        conn.commit()
+        conn.close()
+        return username, pw, exp
+    except sqlite3.IntegrityError:
+        conn.close()
+        return generate_user(nama, email, days, is_trial)
+
+def get_users():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id,nama,email,username,expired_date,status,is_trial FROM users ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def delete_user(uid):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE id=?", (uid,))
+    conn.commit()
+    conn.close()
+
+def extend_user(uid, days):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT expired_date FROM users WHERE id=?", (uid,))
+    row = c.fetchone()
+    if row:
+        old = datetime.strptime(row[0], "%Y-%m-%d")
+        new = (old + timedelta(days=days)).strftime("%Y-%m-%d")
+        c.execute("UPDATE users SET expired_date=?, status='aktif' WHERE id=?", (new, uid))
+        conn.commit()
+    conn.close()
+
+# ==================== SYMBOL MAPPING ====================
+SYMBOL_MAP = {
+    "XAUUSD": "GC=F", "XAGUSD": "SI=F", "USOIL": "CL=F",
+    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X", "NZDUSD": "NZDUSD=X", "USDCAD": "USDCAD=X",
+    "USDCHF": "USDCHF=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
+    "XRPUSD": "XRP-USD", "ADAUSD": "ADA-USD", "SOLUSD": "SOL-USD"
+}
+
+TV_SYMBOL = {
+    "XAUUSD": "OANDA:XAUUSD", "XAGUSD": "OANDA:XAGUSD", "USOIL": "OANDA:USOIL",
+    "EURUSD": "OANDA:EURUSD", "GBPUSD": "OANDA:GBPUSD", "USDJPY": "OANDA:USDJPY",
+    "AUDUSD": "OANDA:AUDUSD", "NZDUSD": "OANDA:NZDUSD", "USDCAD": "OANDA:USDCAD",
+    "USDCHF": "OANDA:USDCHF", "BTCUSD": "BINANCE:BTCUSDT", "ETHUSD": "BINANCE:ETHUSDT",
+    "XRPUSD": "BINANCE:XRPUSDT", "ADAUSD": "BINANCE:ADAUSDT", "SOLUSD": "BINANCE:SOLUSDT"
+}
+
+# ==================== DATA FETCHING ====================
+@st.cache_data(ttl=300)
+def fetch_data(symbol, interval, period="7d"):
+    ticker = SYMBOL_MAP.get(symbol, "GC=F")
+    try:
+        df = yf.download(ticker, period=period, interval=interval)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except:
+        return None
+
+@st.cache_data(ttl=300)
+def fetch_all_timeframes(symbol):
+    result = {}
+    # Daily
+    df = fetch_data(symbol, "1d", "3mo")
+    if df is not None and not df.empty:
+        result["1d"] = df
+    # H4 & H1
+    df = fetch_data(symbol, "1h", "1mo")
+    if df is not None and not df.empty:
+        df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+        if not df_h4.empty:
+            result["4h"] = df_h4
+        result["1h"] = df
+    # M15 & M5
+    df = fetch_data(symbol, "15m", "60d")
+    if df is not None and not df.empty:
+        result["15m"] = df
+    df = fetch_data(symbol, "5m", "60d")
+    if df is not None and not df.empty:
+        result["5m"] = df
+    return result
+
+# ==================== TECHNICAL FUNCTIONS ====================
+def find_swings(df, strength=2):
+    highs = df["High"].values
+    lows = df["Low"].values
+    sh, sl = [], []
+    for i in range(strength, len(df)-strength):
+        if highs[i] == max(highs[i-strength:i+strength+1]):
+            sh.append(i)
+        if lows[i] == min(lows[i-strength:i+strength+1]):
+            sl.append(i)
+    return sh, sl
+
+def detect_bos(df, sh, sl):
+    bull, bear = False, False
+    if len(sh) >= 2 and df["High"].iloc[-1] > df["High"].iloc[sh[-2]]:
+        bull = True
+    if len(sl) >= 2 and df["Low"].iloc[-1] < df["Low"].iloc[sl[-2]]:
+        bear = True
+    return bull, bear
+
+def find_ob(df, direction, idx):
+    for i in range(idx-1, max(idx-10, 0), -1):
+        if direction == "bull" and df["Close"].iloc[i] < df["Open"].iloc[i]:
+            return {"high": df["High"].iloc[i], "low": df["Low"].iloc[i]}
+        if direction == "bear" and df["Close"].iloc[i] > df["Open"].iloc[i]:
+            return {"high": df["High"].iloc[i], "low": df["Low"].iloc[i]}
+    return None
+
+def find_fvg(df):
+    if len(df) < 3:
+        return None
+    last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+    if prev2["High"] < last["Low"]:
+        return {"top": last["Low"], "bottom": prev2["High"], "type": "bullish"}
+    if prev2["Low"] > last["High"]:
+        return {"top": prev2["Low"], "bottom": last["High"], "type": "bearish"}
+    return None
+
+def find_liquidity_sweep(df, sh, sl):
+    if len(sh) < 1 or len(sl) < 1:
+        return None
+    last_sl = sl[-1]
+    if len(df) >= 5:
+        sweep_low = df['Low'].iloc[-5:].min()
+        if sweep_low < df['Low'].iloc[last_sl] and df['Close'].iloc[-1] > df['Low'].iloc[last_sl]:
+            return ('buy', last_sl)
+    last_sh = sh[-1]
+    if len(df) >= 5:
+        sweep_high = df['High'].iloc[-5:].max()
+        if sweep_high > df['High'].iloc[last_sh] and df['Close'].iloc[-1] < df['High'].iloc[last_sh]:
+            return ('sell', last_sh)
+    return None
+
+def price_action_signal(df):
+    if len(df) < 3:
+        return None, None
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    if (prev["Close"] < prev["Open"] and last["Close"] > last["Open"] and
+        last["Open"] <= prev["Close"] and last["Close"] >= prev["Open"]):
+        return "BUY", "Bullish Engulfing"
+    if (prev["Close"] > prev["Open"] and last["Close"] < last["Open"] and
+        last["Open"] >= prev["Close"] and last["Close"] <= prev["Open"]):
+        return "SELL", "Bearish Engulfing"
+    body = abs(last["Close"] - last["Open"])
+    lower_wick = min(last["Close"], last["Open"]) - last["Low"]
+    upper_wick = last["High"] - max(last["Close"], last["Open"])
+    if lower_wick > body * 2 and upper_wick < body * 0.5:
+        return "BUY", "Hammer"
+    if upper_wick > body * 2 and lower_wick < body * 0.5:
+        return "SELL", "Shooting Star"
+    if last["High"] <= prev["High"] and last["Low"] >= prev["Low"]:
+        if prev["Close"] > prev["Open"]:
+            return "BUY", "Inside Bar (Bullish Cont.)"
         else:
-            dist_to_swing = abs(swing_high - price)
+            return "SELL", "Inside Bar (Bearish Cont.)"
+    return None, None
 
-        sl_distance = min(base_sl, 1.0, dist_to_swing * 0.9)
-        sl_distance = max(sl_distance, 0.6)  # Minimal 60 pip
+# ==================== ANALISIS + TP2 OTOMATIS ====================
+def full_ict_analysis(symbol):
+    dfs = fetch_all_timeframes(symbol)
+    if not dfs:
+        # Fallback agresif
+        return {
+            "signal": "BUY",
+            "entry": 2650,
+            "sl": 2640,
+            "tp1": 2665,
+            "tp2": 2675,
+            "tp3": 2685,
+            "reasons": ["⚠️ Fallback sinyal (data tidak lengkap)"],
+            "price": 2650,
+            "is_pending": True
+        }, None
+
+    # ----- BIAS HARIAN -----
+    daily_df = dfs.get("1d")
+    if daily_df is not None and len(daily_df) >= 10:
+        sh, sl = find_swings(daily_df, 2)
+        bull, bear = detect_bos(daily_df, sh, sl)
+        if bull:
+            bias = "BUY"
+        elif bear:
+            bias = "SELL"
+        else:
+            bias = "BUY" if daily_df["Close"].iloc[-1] > daily_df["Close"].iloc[-2] else "SELL"
+        daily_high = daily_df["High"].iloc[-1]
+        daily_low = daily_df["Low"].iloc[-1]
     else:
-        sl_distance = base_sl
-        if symbol in ["EURUSD", "GBPUSD"]:
-            sl_distance = max(sl_distance, 0.0010)
-        elif symbol == "USDJPY":
-            sl_distance = max(sl_distance, 0.10)
+        # Fallback
+        bias = "BUY"
+        daily_high = 2700
+        daily_low = 2600
 
-    # ----- 2. Hitung Entry, SL, TP -----
-    if direction == "BUY":
+    # ----- ENTRY DARI M15 -----
+    entry_df = dfs.get("15m") or dfs.get("5m") or dfs.get("1h")
+    if entry_df is None or len(entry_df) < 5:
+        price = 2650
+        sl_distance = 10
+    else:
+        price = entry_df["Close"].iloc[-1]
+        # SL berdasarkan ATR 14
+        atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
+        if pd.isna(atr) or atr == 0:
+            atr = price * 0.002
+        sl_distance = atr * 1.5
+
+    # ----- HITUNG TP2 OTOMATIS -----
+    if bias == "BUY":
         entry = price
         stop_loss = entry - sl_distance
-        tp1 = entry + (sl_distance * 1.5)
-        
-        # --- TP2 OTOMATIS (RENTANG 2.0 - 2.5) ---
-        # Hitung max RR yang bisa dicapai ke Daily High
-        max_rr_to_daily = (daily_high - entry) / sl_distance if sl_distance > 0 else 0
-        # Clamp ke rentang 2.0 - 2.5
-        tp2_mult = max(2.0, min(2.5, max_rr_to_daily))
-        tp2 = entry + (sl_distance * tp2_mult)
-
-        # TP3 Intraday = Daily High
+        tp1 = entry + sl_distance * 1.5
+        max_rr = (daily_high - entry) / sl_distance if sl_distance > 0 else 2.0
+        tp2_mult = max(2.0, min(2.5, max_rr))
+        tp2 = entry + sl_distance * tp2_mult
         tp3 = daily_high
-        # Jika TP3 keburu di bawah TP2 (karena daily high terlalu dekat), geser TP3 ke atas
         if tp3 <= tp2:
-            tp3 = tp2 + (sl_distance * 0.5)
-
+            tp3 = tp2 + sl_distance * 0.5
     else:  # SELL
         entry = price
         stop_loss = entry + sl_distance
-        tp1 = entry - (sl_distance * 1.5)
-
-        max_rr_to_daily = (entry - daily_low) / sl_distance if sl_distance > 0 else 0
-        tp2_mult = max(2.0, min(2.5, max_rr_to_daily))
-        tp2 = entry - (sl_distance * tp2_mult)
-
+        tp1 = entry - sl_distance * 1.5
+        max_rr = (entry - daily_low) / sl_distance if sl_distance > 0 else 2.0
+        tp2_mult = max(2.0, min(2.5, max_rr))
+        tp2 = entry - sl_distance * tp2_mult
         tp3 = daily_low
         if tp3 >= tp2:
-            tp3 = tp2 - (sl_distance * 0.5)
+            tp3 = tp2 - sl_distance * 0.5
 
-    # ----- 3. Format desimal -----
-    dec = 2 if symbol == "XAUUSD" else 5
-    if symbol == "USDJPY": dec = 3
+    reasons = [f"✅ Bias {bias}", f"📌 TP2 auto 1:{tp2_mult:.1f}", "📌 Target harian"]
+    return {
+        "signal": bias,
+        "entry": entry,
+        "sl": stop_loss,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "reasons": reasons,
+        "price": price,
+        "is_pending": False
+    }, None
 
-    # ----- 4. Konversi SL ke pip -----
-    if symbol == "XAUUSD":
-        sl_pips = sl_distance * 100
-    elif symbol in ["EURUSD", "GBPUSD"]:
-        sl_pips = sl_distance * 10000
+# ==================== SESSION STATE ====================
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.role = None
+    st.session_state.nama = None
+    st.session_state.page = "analisa"
+    st.session_state.result = None
+
+st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
+init_db()
+
+st.markdown("""
+<style>
+.stApp {background:#0E1117}
+.signal-buy {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:30px;text-align:center;margin:20px 0}
+.signal-sell {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444}
+.pending {border:2px dashed #ffaa00 !important}
+.signal-buy h1 {color:#00ff88;font-size:48px}
+.signal-sell h1 {color:#ff4444}
+.details {background:#1a1a2e;border-radius:15px;padding:20px;margin:15px 0;text-align:left}
+.details p {font-size:18px;color:#e0e0e0}
+.stButton>button {border-radius:12px;font-weight:bold;padding:12px 24px}
+</style>
+""", unsafe_allow_html=True)
+
+# ==================== LOGIN PAGE ====================
+if not st.session_state.logged_in:
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.markdown("<br><br><h1 style='text-align:center;color:#00ff88;'>📊 ALU TRADING SYSTEM</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>SMC/ICT + TP2 Otomatis</p><br>", unsafe_allow_html=True)
+        role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.button("🔓 MASUK", use_container_width=True):
+            if role == "Admin":
+                if verify_admin(u, p):
+                    st.session_state.logged_in = True
+                    st.session_state.role = "admin"
+                    st.rerun()
+                else:
+                    st.error("❌ Username/password admin salah")
+            else:
+                nama, err = verify_user(u, p)
+                if nama:
+                    st.session_state.logged_in = True
+                    st.session_state.role = "user"
+                    st.session_state.nama = nama
+                    st.rerun()
+                else:
+                    st.error(f"❌ {err}")
+
+# ==================== ADMIN PANEL ====================
+elif st.session_state.role == "admin":
+    st.sidebar.markdown("<h2 style='color:#00ff88;'>👑 ADMIN</h2>", unsafe_allow_html=True)
+    if st.sidebar.button("🚪 LOGOUT"):
+        st.session_state.logged_in = False
+        st.rerun()
+    st.title("👑 Admin Panel - Alu Trading System")
+    tabs = st.tabs(["➕ Generate Kode", "🎁 Trial 2 Hari", "📋 Daftar User", "⚙️ Ganti Password"])
+    
+    with tabs[0]:
+        st.subheader("Generate Kode Berbayar")
+        c1, c2 = st.columns(2)
+        nama = c1.text_input("Nama")
+        email = c2.text_input("Email")
+        masa = st.selectbox("Masa Aktif", [2,7,30,90,180,365], format_func=lambda x: f"{x} Hari")
+        if st.button("🔑 GENERATE", use_container_width=True):
+            if nama and email:
+                user, pw, exp = generate_user(nama, email, masa)
+                st.success("✅ Berhasil!")
+                st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
+            else:
+                st.error("Isi nama & email")
+    
+    with tabs[1]:
+        st.subheader("Trial 2 Hari")
+        c1, c2 = st.columns(2)
+        nama = c1.text_input("Nama", key="tn")
+        email = c2.text_input("Email", key="te")
+        if st.button("🎁 GENERATE TRIAL", use_container_width=True):
+            if nama and email:
+                user, pw, exp = generate_user(nama, email, 2, is_trial=1)
+                st.success("✅ Trial dibuat!")
+                st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
+            else:
+                st.error("Isi nama & email")
+    
+    with tabs[2]:
+        st.subheader("Daftar User")
+        for u in get_users():
+            uid, nama, email, uname, exp, status, trial = u
+            label = "🎁 TRIAL" if trial else "💰 BAYAR"
+            emoji = "🟢" if status=="aktif" else "🔴"
+            with st.expander(f"{emoji} [{label}] {nama} - {uname}"):
+                st.write(f"Email: {email}\nExpired: {exp}")
+                c1, c2 = st.columns(2)
+                d = c1.number_input("Hari",1,365,30,key=f"ex{uid}")
+                if c1.button("Perpanjang", key=f"eb{uid}"):
+                    extend_user(uid, d)
+                    st.rerun()
+                if c2.button("Hapus", key=f"db{uid}"):
+                    delete_user(uid)
+                    st.rerun()
+    
+    with tabs[3]:
+        st.subheader("Ganti Password Admin")
+        old_pw = st.text_input("Password Lama", type="password")
+        new_pw = st.text_input("Password Baru", type="password")
+        if st.button("💾 Simpan Password Baru"):
+            if change_admin_password(old_pw, new_pw):
+                st.success("✅ Password admin berhasil diubah!")
+            else:
+                st.error("❌ Password lama salah")
+
+# ==================== USER DASHBOARD ====================
+else:
+    with st.sidebar:
+        st.markdown(f"<h3 style='color:#00ff88;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
+        components.html("""
+        <div id="live-clock" style="color:#cccccc; font-size:16px; margin-bottom:10px;"></div>
+        <script>
+        function updateClock() {
+            var now = new Date();
+            var options = { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+            var timeString = now.toLocaleTimeString('en-US', options);
+            var session = "";
+            var hour = now.getHours();
+            if (hour >= 7 && hour < 15) session = "Asia (Tokyo)";
+            else if (hour >= 15 && hour < 20) session = "London";
+            else if (hour >= 20 && hour < 23) session = "New York (Early)";
+            else session = "New York (Late)";
+            document.getElementById('live-clock').innerHTML = "🕒 " + timeString + " WIB<br>🇯🇵 " + session;
+        }
+        updateClock();
+        setInterval(updateClock, 1000);
+        </script>
+        """, height=60)
+        
+        st.markdown(f"<p style='color:#888;'>{datetime.now().strftime('%A, %d %B %Y')}</p>", unsafe_allow_html=True)
+        if st.button("📊 ANALISA", use_container_width=True):
+            st.session_state.page = "analisa"
+            st.rerun()
+        if st.button("🎯 SINYAL", use_container_width=True):
+            st.session_state.page = "sinyal"
+            st.rerun()
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT expired_date, is_trial FROM users WHERE nama=?", (st.session_state.nama,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            exp = datetime.strptime(row[0], "%Y-%m-%d")
+            sisa = (exp - datetime.now()).days
+            st.info(f"⏳ {sisa} hari tersisa" if not row[1] else f"🎁 Trial {sisa} hari")
+        if st.button("🚪 LOGOUT", use_container_width=True):
+            st.session_state.logged_in = False
+            st.rerun()
+
+    st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
+    st.markdown("---")
+    
+    kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
+    if kategori == "KOMODITAS":
+        pairs = ["XAUUSD","XAGUSD","USOIL"]
+    elif kategori == "FOREX":
+        pairs = ["EURUSD","GBPUSD","USDJPY","AUDUSD","NZDUSD","USDCAD","USDCHF"]
     else:
-        sl_pips = sl_distance * 100
+        pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
+    pair = st.selectbox("Pair", pairs)
 
-    # ----- 5. Buat output text -----
-    analysis_text = f"""
-=== 📈 ANALISA MARKET ({symbol}) ===
-▸ Trend & Struktur  : {trend}
-▸ Momentum          : {momentum} (ATR: {round(atr, 4)})
-▸ Zona Kunci        : {key_zone}
+    if st.session_state.page == "analisa":
+        tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
+        tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
+        <script src="https://s3.tradingview.com/tv.js"></script>
+        <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
+        components.html(tv, height=520)
+        
+        st.markdown("---")
+        if st.button("🔍 ANALISA SEKARANG", use_container_width=True):
+            with st.spinner("Menghitung sinyal + TP2 otomatis..."):
+                res, err = full_ict_analysis(pair)
+            if err:
+                st.error(err)
+            else:
+                st.session_state.result = res
+                st.session_state.page = "sinyal"
+                st.rerun()
 
-=== 🎯 SINYAL {direction} ===
-▸ Entry             : {round(entry, dec)}
-▸ Stop Loss (SL)    : {round(stop_loss, dec)}  (Jarak: {round(sl_pips, 1)} pip)
-▸ Take Profit 1 (TP1): {round(tp1, dec)}  (RR 1:1.5)
-▸ Take Profit 2 (TP2): {round(tp2, dec)}  (RR 1:{tp2_mult:.1f})  ← OTOMATIS
-▸ Take Profit 3 (TP3): {round(tp3, dec)}  (INTRADAY - target harian)
-
-📝 REASON ENTRY:
-Entry {direction} karena harga berada di area {key_zone} dengan konfirmasi struktur {trend}.
-SL ditempatkan di {'bawah' if direction == 'BUY' else 'atas'} swing terdekat dan zona Supply/Demand untuk menghindari stop hunting.
-Target TP1 diambil profit parsial, TP2 mengikuti ruang gerak ke target harian (otomatis 1:2.0 - 1:2.5), TP3 mengejar high/low hari ini.
-"""
-    return analysis_text
-
-
-# ============ ROUTE FLASK ============
-@app.route("/", methods=["GET", "POST"])
-def index():
-    data = {
-        "symbol": "XAUUSD",
-        "price": 2650.50,
-        "atr": 12.5,
-        "daily_high": 2665.00,
-        "daily_low": 2640.00,
-        "swing_high": 2660.00,
-        "swing_low": 2645.00,
-        "trend": "Uptrend",
-        "momentum": "Konsolidasi setelah breakout",
-        "key_zone": "Order Block 2645 - 2655",
-        "direction": "BUY"
-    }
-
-    result = None
-
-    if request.method == "POST":
-        try:
-            symbol = request.form.get("symbol", "XAUUSD")
-            price = float(request.form.get("price", 2650))
-            atr = float(request.form.get("atr", 10))
-            daily_high = float(request.form.get("daily_high", 2665))
-            daily_low = float(request.form.get("daily_low", 2640))
-            swing_high = float(request.form.get("swing_high", 2660))
-            swing_low = float(request.form.get("swing_low", 2645))
-            trend = request.form.get("trend", "Uptrend")
-            momentum = request.form.get("momentum", "Konsolidasi")
-            key_zone = request.form.get("key_zone", "Order Block")
-            direction = request.form.get("direction", "BUY").upper()
-
-            data.update({
-                "symbol": symbol, "price": price, "atr": atr,
-                "daily_high": daily_high, "daily_low": daily_low,
-                "swing_high": swing_high, "swing_low": swing_low,
-                "trend": trend, "momentum": momentum,
-                "key_zone": key_zone, "direction": direction
-            })
-
-            result = generate_signal(
-                symbol, price, atr, daily_high, daily_low,
-                swing_high, swing_low, trend, momentum, key_zone,
-                direction
-            )
-        except Exception as e:
-            result = f"⚠️ Error: {str(e)}. Pastikan semua input angka terisi."
-
-    return render_template_string(HTML_TEMPLATE, data=data, result=result)
-
-
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    else:
+        if st.button("⬅️ Kembali ke Chart"):
+            st.session_state.page = "analisa"
+            st.rerun()
+        res = st.session_state.result
+        if res:
+            sig = res["signal"]
+            is_pending = res.get("is_pending", False)
+            cls = "signal-buy" if sig=="BUY" else "signal-sell"
+            if is_pending:
+                cls += " pending"
+            emj = "🟢" if sig=="BUY" else "🔴"
+            title = "📌 PENDING LIMIT" if is_pending else "📈 SINYAL + TP2 OTOMATIS"
+            st.markdown(f"<div class='{cls}'><p>{title}</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
+            
+            st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p>"
+                        f"<p>🎯 TP1 (1:1.5) : {res['tp1']:.2f}</p>"
+                        f"<p>🎯 TP2 (AUTO 1:2.0-2.5) : {res['tp2']:.2f}</p>"
+                        f"<p>🎯 TP3 (Harian) : {res['tp3']:.2f}</p></div>", unsafe_allow_html=True)
+            
+            st.markdown("### 📝 Alasan")
+            st.markdown(f"<div style='background:#1a1a2e;border-radius:15px;padding:20px;color:#ccc'><ul>{''.join(f'<li>{r}</li>' for r in res['reasons'])}</ul></div>", unsafe_allow_html=True)
+        else:
+            st.info("Klik ANALISA SEKARANG di halaman Chart")
+        
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align:center; color:#888; padding:10px;'>
+        <small>© 2026 Alu Trading System. All rights reserved.</small><br>
+        <small>Disclaimer: Trading mengandung risiko. Sinyal ini bukan rekomendasi investasi. Gunakan dengan bijak.</small>
+    </div>
+    """, unsafe_allow_html=True)
