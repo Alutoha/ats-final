@@ -1,7 +1,8 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import sqlite3
-import bcrypt
+import hashlib
+import os
 import random
 import string
 from datetime import datetime, timedelta
@@ -10,6 +11,18 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
+# ==================== PASSWORD HASHING (NO BCRYPT) ====================
+def hash_password(password):
+    salt = os.urandom(32)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return salt + key
+
+def check_password(password, hashed):
+    salt = hashed[:32]
+    key = hashed[32:]
+    new_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return new_key == key
+
 # ==================== DATABASE SETUP ====================
 def init_db():
     conn = sqlite3.connect("users.db")
@@ -17,15 +30,15 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nama TEXT, email TEXT,
-        username TEXT UNIQUE, password_hash TEXT,
+        username TEXT UNIQUE, password_hash BLOB,
         expired_date TEXT, status TEXT DEFAULT 'aktif',
         is_trial INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS admins (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE, password_hash TEXT)''')
+        username TEXT UNIQUE, password_hash BLOB)''')
     c.execute("SELECT * FROM admins WHERE username='admin'")
     if not c.fetchone():
-        hashed = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt())
+        hashed = hash_password("admin123")
         c.execute("INSERT INTO admins (username, password_hash) VALUES (?,?)", ("admin", hashed))
     conn.commit()
     conn.close()
@@ -39,15 +52,15 @@ def verify_admin(u, p):
     c.execute("SELECT password_hash FROM admins WHERE username=?", (u,))
     row = c.fetchone()
     conn.close()
-    return row and bcrypt.checkpw(p.encode(), row[0])
+    return row and check_password(p, row[0])
 
 def change_admin_password(old_pw, new_pw):
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT password_hash FROM admins WHERE username='admin'")
     row = c.fetchone()
-    if row and bcrypt.checkpw(old_pw.encode(), row[0]):
-        hashed = bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt())
+    if row and check_password(old_pw, row[0]):
+        hashed = hash_password(new_pw)
         c.execute("UPDATE admins SET password_hash=? WHERE username='admin'", (hashed,))
         conn.commit()
         conn.close()
@@ -65,7 +78,7 @@ def verify_user(u, p):
         return None, "Username tidak ditemukan"
     if row[2] != 'aktif':
         return None, "Akun dinonaktifkan"
-    if not bcrypt.checkpw(p.encode(), row[0]):
+    if not check_password(p, row[0]):
         return None, "Password salah"
     expired = datetime.strptime(row[1], "%Y-%m-%d")
     if expired < datetime.now():
@@ -81,7 +94,7 @@ def generate_user(nama, email, days, is_trial=0):
     angka = ''.join(random.choices(string.digits, k=4))
     username = f"USER-{nama.upper()}{angka}"
     pw = ''.join(random.choices(string.ascii_letters + string.digits + "#@!", k=10))
-    hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt())
+    hashed = hash_password(pw)
     exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
     conn = get_conn()
     c = conn.cursor()
@@ -337,7 +350,6 @@ def ict_analysis_mtf(symbol, mode="Intraday"):
     if len(bias_df) < 5 or len(zone_df) < 5 or len(entry_df) < 5:
         return None, "Data tidak cukup untuk analisis multi-timeframe."
     
-    # 1. BIAS
     strength_bias = 2 if mode != "Scalping" else 1
     sh_b, sl_b = find_swings(bias_df, strength_bias)
     bull_bias, bear_bias = detect_bos(bias_df, sh_b, sl_b)
@@ -359,7 +371,6 @@ def ict_analysis_mtf(symbol, mode="Intraday"):
             else:
                 bias = "SELL"
     
-    # 2. ZONA
     sh_z, sl_z = find_swings(zone_df, 2)
     zones = []
     if sl_z:
@@ -377,7 +388,6 @@ def ict_analysis_mtf(symbol, mode="Intraday"):
         else:
             zones.append({"type": "supply_fvg", "high": fvg_z["top"], "low": fvg_z["bottom"]})
     
-    # 3. ENTRY
     sh_e, sl_e = find_swings(entry_df, 1)
     sweep = find_liquidity_sweep(entry_df, sh_e, sl_e, mode)
     ifvg_e = find_ifvg(entry_df)
@@ -513,7 +523,7 @@ if "logged_in" not in st.session_state:
 st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
 init_db()
 
-# CSS + Jam Real-time dengan JavaScript
+# CSS + Jam Real-time
 st.markdown("""
 <style>
 .stApp {background:#0E1117}
@@ -638,7 +648,6 @@ elif st.session_state.role == "admin":
 
 # ==================== USER DASHBOARD ====================
 else:
-    # Sidebar
     with st.sidebar:
         st.markdown(f"<h3 style='color:#00ff88;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
         lang = st.selectbox("Bahasa / Language", ["🇮🇩 Indonesia", "🇬🇧 English"], index=0)
@@ -664,17 +673,15 @@ else:
             st.session_state.logged_in = False
             st.rerun()
 
-    # Header (tanpa jam karena sudah ada di javascript)
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
     with col2:
-        st.markdown("<p style='text-align:right; color:#888;'>Jam & Sesi pasar ditampilkan di atas (real-time)</p>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:right; color:#888;'>Jam & Sesi di atas (real-time)</p>", unsafe_allow_html=True)
     
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
     
-    # Kategori & Pair
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -684,7 +691,6 @@ else:
         pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
     pair = st.selectbox("Pair", pairs)
 
-    # Timeframe
     st.markdown("**Mode Analisa:**")
     cols_tf = st.columns(3)
     tf_options = ["Scalping", "Intraday", "Swing"]
@@ -709,7 +715,6 @@ else:
         else:
             st.warning("Gagal memuat data harga.")
         
-        # Chart TradingView
         tv_interval = config["tv_interval"]
         tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
         tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
@@ -717,7 +722,6 @@ else:
         <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"{tv_interval}","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
         components.html(tv, height=520)
         
-        # HANYA TOMBOL ANALISA (TIDAK ADA BERITA DLL)
         st.markdown("---")
         if st.button("🔍 ANALISA SMC/ICT", use_container_width=True):
             with st.spinner("Menganalisa multi-timeframe..."):
@@ -729,7 +733,7 @@ else:
                 st.session_state.page = "sinyal"
                 st.rerun()
 
-    else:  # Halaman Sinyal
+    else:
         if st.button("⬅️ Kembali ke Chart"):
             st.session_state.page = "analisa"
             st.rerun()
@@ -745,7 +749,6 @@ else:
             st.markdown("### 📝 Alasan Entry")
             st.markdown(f"<div style='background:#1a1a2e;border-radius:15px;padding:20px;color:#ccc'><ul>{''.join(f'<li>{r}</li>' for r in res['reasons'])}</ul></div>", unsafe_allow_html=True)
             
-            # Analisa Mendalam
             st.markdown("### 🔬 Analisa Mendalam (Kondisi Market)")
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -768,7 +771,6 @@ else:
         else:
             st.info("Klik ANALISA SMC/ICT di halaman Chart")
         
-    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
