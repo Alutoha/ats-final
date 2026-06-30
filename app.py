@@ -1,471 +1,3 @@
-import streamlit as st
-import streamlit.components.v1 as components
-import sqlite3
-import hashlib
-import os
-import random
-import string
-from datetime import datetime, timedelta
-import pytz
-import yfinance as yf
-import pandas as pd
-import numpy as np
-
-# ==================== PASSWORD HASHING ====================
-def hash_password(password):
-    salt = os.urandom(32)
-    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
-    return salt + key
-
-def check_password(password, hashed):
-    salt = hashed[:32]
-    key = hashed[32:]
-    new_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
-    return new_key == key
-
-# ==================== DATABASE SETUP ====================
-def init_db():
-    conn = sqlite3.connect("users.db")
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nama TEXT, email TEXT,
-        username TEXT UNIQUE, password_hash BLOB,
-        expired_date TEXT, status TEXT DEFAULT 'aktif',
-        is_trial INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS admins (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE, password_hash BLOB)''')
-    c.execute("SELECT * FROM admins WHERE username='admin'")
-    if not c.fetchone():
-        hashed = hash_password("admin123")
-        c.execute("INSERT INTO admins (username, password_hash) VALUES (?,?)", ("admin", hashed))
-    conn.commit()
-    conn.close()
-
-def get_conn():
-    return sqlite3.connect("users.db")
-
-def verify_admin(u, p):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT password_hash FROM admins WHERE username=?", (u,))
-    row = c.fetchone()
-    conn.close()
-    return row and check_password(p, row[0])
-
-def change_admin_password(old_pw, new_pw):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT password_hash FROM admins WHERE username='admin'")
-    row = c.fetchone()
-    if row and check_password(old_pw, row[0]):
-        hashed = hash_password(new_pw)
-        c.execute("UPDATE admins SET password_hash=? WHERE username='admin'", (hashed,))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
-    return False
-
-def verify_user(u, p):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT password_hash, expired_date, status, nama FROM users WHERE username=?", (u,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return None, "Username tidak ditemukan"
-    if row[2] != 'aktif':
-        return None, "Akun dinonaktifkan"
-    if not check_password(p, row[0]):
-        return None, "Password salah"
-    expired = datetime.strptime(row[1], "%Y-%m-%d")
-    if expired < datetime.now():
-        conn = get_conn()
-        c = conn.cursor()
-        c.execute("UPDATE users SET status='expired' WHERE username=?", (u,))
-        conn.commit()
-        conn.close()
-        return None, "Akun expired"
-    return row[3], None
-
-def generate_user(nama, email, days, is_trial=0):
-    angka = ''.join(random.choices(string.digits, k=4))
-    username = f"USER-{nama.upper()}{angka}"
-    pw = ''.join(random.choices(string.ascii_letters + string.digits + "#@!", k=10))
-    hashed = hash_password(pw)
-    exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
-    conn = get_conn()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users (nama,email,username,password_hash,expired_date,is_trial) VALUES (?,?,?,?,?,?)",
-                  (nama, email, username, hashed, exp, is_trial))
-        conn.commit()
-        conn.close()
-        return username, pw, exp
-    except sqlite3.IntegrityError:
-        conn.close()
-        return generate_user(nama, email, days, is_trial)
-
-def get_users():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id,nama,email,username,expired_date,status,is_trial FROM users ORDER BY id DESC")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def delete_user(uid):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-def extend_user(uid, days):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT expired_date FROM users WHERE id=?", (uid,))
-    row = c.fetchone()
-    if row:
-        old = datetime.strptime(row[0], "%Y-%m-%d")
-        new = (old + timedelta(days=days)).strftime("%Y-%m-%d")
-        c.execute("UPDATE users SET expired_date=?, status='aktif' WHERE id=?", (new, uid))
-        conn.commit()
-    conn.close()
-
-# ==================== SYMBOL MAPPING ====================
-SYMBOL_MAP = {
-    "XAUUSD": "GC=F", "XAGUSD": "SI=F", "USOIL": "CL=F",
-    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
-    "AUDUSD": "AUDUSD=X", "NZDUSD": "NZDUSD=X", "USDCAD": "USDCAD=X",
-    "USDCHF": "USDCHF=X", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
-    "XRPUSD": "XRP-USD", "ADAUSD": "ADA-USD", "SOLUSD": "SOL-USD"
-}
-
-TV_SYMBOL = {
-    "XAUUSD": "OANDA:XAUUSD", "XAGUSD": "OANDA:XAGUSD", "USOIL": "OANDA:USOIL",
-    "EURUSD": "OANDA:EURUSD", "GBPUSD": "OANDA:GBPUSD", "USDJPY": "OANDA:USDJPY",
-    "AUDUSD": "OANDA:AUDUSD", "NZDUSD": "OANDA:NZDUSD", "USDCAD": "OANDA:USDCAD",
-    "USDCHF": "OANDA:USDCHF", "BTCUSD": "BINANCE:BTCUSDT", "ETHUSD": "BINANCE:ETHUSDT",
-    "XRPUSD": "BINANCE:XRPUSDT", "ADAUSD": "BINANCE:ADAUSDT", "SOLUSD": "BINANCE:SOLUSDT"
-}
-
-# ==================== DATA FETCHING ====================
-@st.cache_data(ttl=300)
-def fetch_data(symbol, interval, period="7d"):
-    ticker = SYMBOL_MAP.get(symbol, "GC=F")
-    try:
-        df = yf.download(ticker, period=period, interval=interval)
-        if df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df.dropna()
-    except:
-        return None
-
-@st.cache_data(ttl=300)
-def fetch_all_timeframes(symbol):
-    result = {}
-    df = fetch_data(symbol, "1d", "3mo")
-    if df is not None and not df.empty:
-        result["1d"] = df
-    df = fetch_data(symbol, "1h", "1mo")
-    if df is not None and not df.empty:
-        df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
-        if not df_h4.empty:
-            result["4h"] = df_h4
-        result["1h"] = df
-    df = fetch_data(symbol, "15m", "60d")
-    if df is not None and not df.empty:
-        result["15m"] = df
-    df = fetch_data(symbol, "5m", "60d")
-    if df is not None and not df.empty:
-        result["5m"] = df
-    return result
-
-# ==================== TECHNICAL FUNCTIONS ====================
-def find_swings(df, strength=2):
-    highs = df["High"].values
-    lows = df["Low"].values
-    sh, sl = [], []
-    for i in range(strength, len(df)-strength):
-        if highs[i] == max(highs[i-strength:i+strength+1]):
-            sh.append(i)
-        if lows[i] == min(lows[i-strength:i+strength+1]):
-            sl.append(i)
-    return sh, sl
-
-def detect_bos(df, sh, sl):
-    bull, bear = False, False
-    if len(sh) >= 2 and df["High"].iloc[-1] > df["High"].iloc[sh[-2]]:
-        bull = True
-    if len(sl) >= 2 and df["Low"].iloc[-1] < df["Low"].iloc[sl[-2]]:
-        bear = True
-    return bull, bear
-
-def find_ob(df, direction, idx):
-    for i in range(idx-1, max(idx-10, 0), -1):
-        if direction == "bull" and df["Close"].iloc[i] < df["Open"].iloc[i]:
-            return {"high": df["High"].iloc[i], "low": df["Low"].iloc[i]}
-        if direction == "bear" and df["Close"].iloc[i] > df["Open"].iloc[i]:
-            return {"high": df["High"].iloc[i], "low": df["Low"].iloc[i]}
-    return None
-
-def find_fvg(df):
-    if len(df) < 3:
-        return None
-    last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
-    if prev2["High"] < last["Low"]:
-        return {"top": last["Low"], "bottom": prev2["High"], "type": "bullish"}
-    if prev2["Low"] > last["High"]:
-        return {"top": prev2["Low"], "bottom": last["High"], "type": "bearish"}
-    return None
-
-# ==================== DUAL-ZONE SIGNAL GENERATOR ====================
-def generate_dual_signals(symbol):
-    dfs = fetch_all_timeframes(symbol)
-    if not dfs:
-        return None, None, "Data tidak lengkap."
-
-    daily_df = dfs.get("1d")
-    if daily_df is None or not isinstance(daily_df, pd.DataFrame) or daily_df.empty or len(daily_df) < 10:
-        return None, None, "Data daily tidak cukup."
-    sh_d, sl_d = find_swings(daily_df, 2)
-    bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
-    bias = "BUY" if bull_bias else ("SELL" if bear_bias else "NEUTRAL")
-
-    zone_df = dfs.get("4h")
-    if zone_df is None or not isinstance(zone_df, pd.DataFrame) or zone_df.empty:
-        zone_df = dfs.get("1h")
-    if zone_df is None or not isinstance(zone_df, pd.DataFrame) or zone_df.empty or len(zone_df) < 10:
-        return None, None, "Data zona tidak cukup."
-
-    sh_z, sl_z = find_swings(zone_df, 2)
-    supply_zones = []
-    demand_zones = []
-
-    for idx in sh_z[-3:]:
-        ob = find_ob(zone_df, "bear", idx)
-        if ob:
-            supply_zones.append(ob)
-    for idx in sl_z[-3:]:
-        ob = find_ob(zone_df, "bull", idx)
-        if ob:
-            demand_zones.append(ob)
-    fvg = find_fvg(zone_df)
-    if fvg:
-        if fvg["type"] == "bearish":
-            supply_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
-        elif fvg["type"] == "bullish":
-            demand_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
-
-    entry_df = dfs.get("15m")
-    if entry_df is None or not isinstance(entry_df, pd.DataFrame) or entry_df.empty:
-        entry_df = dfs.get("5m")
-    if entry_df is not None and not entry_df.empty:
-        price = entry_df["Close"].iloc[-1]
-        atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
-        if pd.isna(atr) or atr <= 0:
-            atr = price * 0.002
-    else:
-        price = 2650
-        atr = 10
-
-    best_supply = None
-    for zone in supply_zones:
-        if zone["high"] > price and (zone["high"] - price) < 3 * atr:
-            if best_supply is None or zone["high"] < best_supply["high"]:
-                best_supply = zone
-    best_demand = None
-    for zone in demand_zones:
-        if zone["low"] < price and (price - zone["low"]) < 3 * atr:
-            if best_demand is None or zone["low"] > best_demand["low"]:
-                best_demand = zone
-
-    def calc_signal(direction, zone, price):
-        if symbol == "XAUUSD":
-            distance = 10.0
-            tp2_dist = 15.0
-            tp3_dist = 20.0
-            if direction == "SELL":
-                entry = zone["high"]
-                sl = entry + distance
-                tp1 = entry - distance
-                tp2 = entry - tp2_dist
-                tp3 = entry - tp3_dist
-                tp4 = "Open"
-            else:
-                entry = zone["low"]
-                sl = entry - distance
-                tp1 = entry + distance
-                tp2 = entry + tp2_dist
-                tp3 = entry + tp3_dist
-                tp4 = "Open"
-        else:
-            zone_width = zone["high"] - zone["low"]
-            if direction == "SELL":
-                entry = zone["high"]
-                sl = entry + zone_width
-                tp1 = entry - zone_width
-                tp2 = entry - zone_width * 2
-                tp3 = entry - zone_width * 3
-                tp4 = "Open"
-            else:
-                entry = zone["low"]
-                sl = entry - zone_width
-                tp1 = entry + zone_width
-                tp2 = entry + zone_width * 2
-                tp3 = entry + zone_width * 3
-                tp4 = "Open"
-        return entry, sl, tp1, tp2, tp3, tp4
-
-    sell_signal = None
-    if best_supply:
-        entry, sl, tp1, tp2, tp3, tp4 = calc_signal("SELL", best_supply, price)
-        sell_signal = {
-            "direction": "SELL",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "tp4": tp4,
-            "zone_high": best_supply["high"],
-            "zone_low": best_supply["low"],
-            "reason": f"Supply zone dari order block bearish di {best_supply['high']:.2f}-{best_supply['low']:.2f}. Konfirmasi: struktur lower high, potensi distribusi.",
-            "status": "pending"
-        }
-    buy_signal = None
-    if best_demand:
-        entry, sl, tp1, tp2, tp3, tp4 = calc_signal("BUY", best_demand, price)
-        buy_signal = {
-            "direction": "BUY",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "tp4": tp4,
-            "zone_high": best_demand["high"],
-            "zone_low": best_demand["low"],
-            "reason": f"Demand zone dari order block bullish di {best_demand['high']:.2f}-{best_demand['low']:.2f}. Konfirmasi: akumulasi, pantulan valid.",
-            "status": "pending"
-        }
-    return sell_signal, buy_signal, bias
-
-# ==================== SESSION STATE ====================
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.role = None
-    st.session_state.nama = None
-    st.session_state.pair = "XAUUSD"
-    # Ganti sell_touched / buy_touched dengan triggered_orders list
-    st.session_state.triggered_orders = []  # list of dict
-    st.session_state.trigger_counter = 0   # untuk unique id
-
-st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
-init_db()
-
-st.markdown("""
-<style>
-.stApp {background:#0E1117}
-.sell-card {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
-.buy-card {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
-.running {border:2px dashed #ffff00 !important}
-.triggered-card {background:#1a1a2e; border:2px solid #ffaa00; border-radius:20px; padding:20px; margin:10px 0; color:#fff}
-.details {background:#1a1a2e;border-radius:15px;padding:15px;margin-top:10px}
-</style>
-""", unsafe_allow_html=True)
-
-# ==================== LOGIN PAGE ====================
-if not st.session_state.logged_in:
-    col1, col2, col3 = st.columns([1,2,1])
-    with col2:
-        st.markdown("<br><br><h1 style='text-align:center;color:#00ff88;'>📊 ALU TRADING SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>Dual-Zone Limit Signal</p><br>", unsafe_allow_html=True)
-        role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.button("🔓 MASUK", use_container_width=True):
-            if role == "Admin":
-                if verify_admin(u, p):
-                    st.session_state.logged_in = True
-                    st.session_state.role = "admin"
-                    st.rerun()
-                else:
-                    st.error("❌ Username/password admin salah")
-            else:
-                nama, err = verify_user(u, p)
-                if nama:
-                    st.session_state.logged_in = True
-                    st.session_state.role = "user"
-                    st.session_state.nama = nama
-                    st.rerun()
-                else:
-                    st.error(f"❌ {err}")
-
-# ==================== ADMIN PANEL ====================
-elif st.session_state.role == "admin":
-    st.sidebar.markdown("<h2 style='color:#00ff88;'>👑 ADMIN</h2>", unsafe_allow_html=True)
-    if st.sidebar.button("🚪 LOGOUT"):
-        st.session_state.logged_in = False
-        st.rerun()
-    st.title("👑 Admin Panel - Alu Trading System")
-    tabs = st.tabs(["➕ Generate Kode", "🎁 Trial 2 Hari", "📋 Daftar User", "⚙️ Ganti Password"])
-    with tabs[0]:
-        st.subheader("Generate Kode Berbayar")
-        c1, c2 = st.columns(2)
-        nama = c1.text_input("Nama")
-        email = c2.text_input("Email")
-        masa = st.selectbox("Masa Aktif", [2,7,30,90,180,365], format_func=lambda x: f"{x} Hari")
-        if st.button("🔑 GENERATE", use_container_width=True):
-            if nama and email:
-                user, pw, exp = generate_user(nama, email, masa)
-                st.success("✅ Berhasil!")
-                st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
-            else:
-                st.error("Isi nama & email")
-    with tabs[1]:
-        st.subheader("Trial 2 Hari")
-        c1, c2 = st.columns(2)
-        nama = c1.text_input("Nama", key="tn")
-        email = c2.text_input("Email", key="te")
-        if st.button("🎁 GENERATE TRIAL", use_container_width=True):
-            if nama and email:
-                user, pw, exp = generate_user(nama, email, 2, is_trial=1)
-                st.success("✅ Trial dibuat!")
-                st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
-            else:
-                st.error("Isi nama & email")
-    with tabs[2]:
-        st.subheader("Daftar User")
-        for u in get_users():
-            uid, nama, email, uname, exp, status, trial = u
-            label = "🎁 TRIAL" if trial else "💰 BAYAR"
-            emoji = "🟢" if status=="aktif" else "🔴"
-            with st.expander(f"{emoji} [{label}] {nama} - {uname}"):
-                st.write(f"Email: {email}\nExpired: {exp}")
-                c1, c2 = st.columns(2)
-                d = c1.number_input("Hari",1,365,30,key=f"ex{uid}")
-                if c1.button("Perpanjang", key=f"eb{uid}"):
-                    extend_user(uid, d)
-                    st.rerun()
-                if c2.button("Hapus", key=f"db{uid}"):
-                    delete_user(uid)
-                    st.rerun()
-    with tabs[3]:
-        st.subheader("Ganti Password Admin")
-        old_pw = st.text_input("Password Lama", type="password")
-        new_pw = st.text_input("Password Baru", type="password")
-        if st.button("💾 Simpan Password Baru"):
-            if change_admin_password(old_pw, new_pw):
-                st.success("✅ Password admin berhasil diubah!")
-            else:
-                st.error("❌ Password lama salah")
-
 # ==================== USER DASHBOARD ====================
 else:
     with st.sidebar:
@@ -503,6 +35,11 @@ else:
             st.session_state.logged_in = False
             st.rerun()
 
+        # Tombol Clear diletakkan di sidebar dengan key unik dan konfirmasi
+        if st.button("🗑️ Clear All Triggered Orders", use_container_width=True, key="clear_sidebar"):
+            st.session_state.triggered_orders = []
+            st.rerun()
+
     st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
@@ -537,30 +74,23 @@ else:
     live_price = get_live_price(pair)
 
     # === MANAGE TRIGGERED ORDERS ===
-    # Check existing triggered orders for SL/TP hit
     if live_price is not None:
         to_remove = []
         for order in st.session_state.triggered_orders:
             if order["status"] != "running":
                 continue
-            # Check SL: for BUY, if price <= sl; for SELL, if price >= sl
-            # Check TP3 (max target): for BUY, price >= tp3; for SELL, price <= tp3
             if order["direction"] == "BUY":
                 if live_price <= order["sl"] or live_price >= order["tp3"]:
                     to_remove.append(order["id"])
             else:  # SELL
                 if live_price >= order["sl"] or live_price <= order["tp3"]:
                     to_remove.append(order["id"])
-        # Remove hit orders
         st.session_state.triggered_orders = [
             o for o in st.session_state.triggered_orders if o["id"] not in to_remove
         ]
 
-    # Check if new limit signal triggered (entry touched)
     if live_price is not None:
-        # For Sell Limit: if price >= entry and not already in triggered_orders with same entry
         if sell_sig and live_price >= sell_sig["entry"]:
-            # avoid duplicate
             already_triggered = any(
                 o["direction"] == "SELL" and o["entry"] == sell_sig["entry"] and o["status"] == "running"
                 for o in st.session_state.triggered_orders
@@ -617,8 +147,6 @@ else:
     st.subheader("🎯 Sinyal Limit Order (Pending)")
     col1, col2 = st.columns(2)
     with col1:
-        # SELL LIMIT CARD
-        # Jika ada triggered running SELL, maka tampilkan "Waiting new Sell Limit"
         active_sell_trigger = any(o["direction"] == "SELL" and o["status"] == "running" for o in st.session_state.triggered_orders)
         if active_sell_trigger:
             st.markdown("""<div class='sell-card'><h3>🟡 Waiting new SELL LIMIT</h3><p>Zona supply belum valid / sedang menunggu setup baru.</p></div>""", unsafe_allow_html=True)
@@ -639,7 +167,6 @@ else:
                 st.info("Tidak ada supply zone valid di atas harga.")
 
     with col2:
-        # BUY LIMIT CARD
         active_buy_trigger = any(o["direction"] == "BUY" and o["status"] == "running" for o in st.session_state.triggered_orders)
         if active_buy_trigger:
             st.markdown("""<div class='buy-card'><h3>🟡 Waiting new BUY LIMIT</h3><p>Zona demand belum valid / sedang menunggu setup baru.</p></div>""", unsafe_allow_html=True)
@@ -666,7 +193,6 @@ else:
         st.subheader("⚡ Active Triggered Orders")
         for order in running_orders:
             direction = order["direction"]
-            cls = "sell-card" if direction == "SELL" else "buy-card"
             emoji = "🔴" if direction == "SELL" else "🟢"
             tp4_str = f"<p>TP4: {order['tp4']}</p>" if order['tp4'] == "Open" else f"<p>TP4: {order['tp4']:.2f}</p>"
             st.markdown(f"""
@@ -681,11 +207,6 @@ else:
                 <div class='details'><small>{order['reason']}</small></div>
             </div>
             """, unsafe_allow_html=True)
-
-    # Tombol reset manual (optional, untuk clear semua triggered orders)
-    if st.button("🗑️ Clear All Triggered Orders"):
-        st.session_state.triggered_orders = []
-        st.rerun()
 
     # Footer
     st.markdown("---")
