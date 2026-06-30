@@ -168,24 +168,24 @@ def fetch_data(symbol, interval, period="7d"):
 
 @st.cache_data(ttl=300)
 def fetch_all_timeframes(symbol):
-    """Ambil data semua timeframe yang diperlukan."""
     result = {}
-    # Daily (paling penting)
+    # Daily
     df = fetch_data(symbol, "1d", "3mo")
-    if df is not None:
+    if df is not None and not df.empty:
         result["1d"] = df
     # H4 & H1
     df = fetch_data(symbol, "1h", "1mo")
-    if df is not None:
+    if df is not None and not df.empty:
         df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
-        result["4h"] = df_h4
+        if not df_h4.empty:
+            result["4h"] = df_h4
         result["1h"] = df
     # M15 & M5
     df = fetch_data(symbol, "15m", "60d")
-    if df is not None:
+    if df is not None and not df.empty:
         result["15m"] = df
     df = fetch_data(symbol, "5m", "60d")
-    if df is not None:
+    if df is not None and not df.empty:
         result["5m"] = df
     return result
 
@@ -275,7 +275,9 @@ def full_ict_analysis(symbol):
     
     # Bias dari Daily atau H4
     bias_df = dfs.get("1d") or dfs.get("4h")
-    if bias_df is None or len(bias_df) < 10:
+    if bias_df is None or (hasattr(bias_df, 'empty') and bias_df.empty):
+        return None, "Data timeframe tinggi tidak tersedia."
+    if len(bias_df) < 10:
         return None, "Data timeframe tinggi tidak cukup."
     
     sh_b, sl_b = find_swings(bias_df, 2)
@@ -285,7 +287,6 @@ def full_ict_analysis(symbol):
     elif bear and not bull:
         bias = "SELL"
     else:
-        # Fallback: tren sederhana
         if len(bias_df) >= 20:
             sma20 = bias_df["Close"].rolling(20).mean().iloc[-1]
             bias = "BUY" if bias_df["Close"].iloc[-1] > sma20 else "SELL"
@@ -293,8 +294,8 @@ def full_ict_analysis(symbol):
             bias = "BUY" if bias_df["Close"].iloc[-1] > bias_df["Close"].iloc[0] else "SELL"
     
     # Zona dari H4 atau H1
-    zone_df = dfs.get("4h") or dfs.get("1h")
-    if zone_df is None:
+    zone_df = dfs.get("4h") or dfs.get("1h") or bias_df
+    if zone_df is None or len(zone_df) < 5:
         zone_df = bias_df
     
     sh_z, sl_z = find_swings(zone_df, 2)
@@ -316,8 +317,8 @@ def full_ict_analysis(symbol):
     
     # Entry: M15 > M5 > H1
     entry_df = dfs.get("15m") or dfs.get("5m") or dfs.get("1h")
-    if entry_df is None:
-        return None, "Data entry tidak tersedia."
+    if entry_df is None or len(entry_df) < 5:
+        return None, "Data timeframe rendah tidak tersedia."
     
     sh_e, sl_e = find_swings(entry_df, 1)
     sweep = find_liquidity_sweep(entry_df, sh_e, sl_e)
@@ -327,9 +328,9 @@ def full_ict_analysis(symbol):
     signal = None
     reasons = []
     entry_price = sl_price = None
-    is_pending = False  # tanda apakah ini sinyal pending limit
+    is_pending = False
     
-    def near_zone(price, zone, threshold=0.015):  # diperlebar ke 1.5%
+    def near_zone(price, zone, threshold=0.015):
         return abs(price - zone["low"]) / price < threshold or abs(price - zone["high"]) / price < threshold
     
     valid_zones = [z for z in zones if (bias == "BUY" and "demand" in z["type"]) or (bias == "SELL" and "supply" in z["type"])]
@@ -348,7 +349,6 @@ def full_ict_analysis(symbol):
                     reasons = [f"✅ Bias Bullish", f"✅ {pa_desc} di Demand Zone"]
                     signal = "BUY"
                     break
-        # Fallback Pending Limit Order di zona demand terdekat
         if not signal and valid_zones:
             for zone in valid_zones:
                 if zone["type"] == "demand" and price > zone["low"]:
@@ -365,7 +365,6 @@ def full_ict_analysis(symbol):
                     signal = "BUY"
                     is_pending = True
                     break
-        # Terakhir, sinyal agresif
         if not signal:
             entry_price = price
             sl_price = min(entry_df["Low"].iloc[-5:]) - 0.5
@@ -438,7 +437,6 @@ if "logged_in" not in st.session_state:
 st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
 init_db()
 
-# CSS
 st.markdown("""
 <style>
 .stApp {background:#0E1117}
@@ -545,10 +543,8 @@ elif st.session_state.role == "admin":
 
 # ==================== USER DASHBOARD ====================
 else:
-    # Sidebar
     with st.sidebar:
         st.markdown(f"<h3 style='color:#00ff88;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
-        # Jam real-time
         components.html("""
         <div id="live-clock" style="color:#cccccc; font-size:16px; margin-bottom:10px;"></div>
         <script>
@@ -589,12 +585,10 @@ else:
             st.session_state.logged_in = False
             st.rerun()
 
-    # Header
     st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
     
-    # Pilih Pair
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -622,7 +616,7 @@ else:
                 st.session_state.page = "sinyal"
                 st.rerun()
 
-    else:  # Halaman Sinyal
+    else:
         if st.button("⬅️ Kembali ke Chart"):
             st.session_state.page = "analisa"
             st.rerun()
@@ -646,7 +640,6 @@ else:
         else:
             st.info("Klik ANALISA SEKARANG di halaman Chart")
         
-    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
