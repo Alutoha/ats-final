@@ -1,0 +1,6 @@
+streamlit
+bcrypt
+yfinance
+pandas
+numpy
+pytz
