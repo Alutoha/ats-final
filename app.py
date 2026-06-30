@@ -530,13 +530,13 @@ else:
         try:
             df = yf.download(ticker, period="1d", interval="1m")
             if not df.empty:
-                return df["Close"].iloc[-1]
+                return float(df["Close"].iloc[-1])
         except:
             pass
         return None
 
     live_price = get_live_price(pair)
-    if live_price:
+    if live_price is not None:
         if sell_sig and not st.session_state.sell_touched and live_price >= sell_sig["entry"]:
             st.session_state.sell_touched = True
         if buy_sig and not st.session_state.buy_touched and live_price <= buy_sig["entry"]:
