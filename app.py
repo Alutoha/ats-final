@@ -287,7 +287,7 @@ def generate_dual_signals(symbol):
 
     def calc_signal(direction, zone, price):
         if symbol == "XAUUSD":
-            distance = 10.0  # SL dan TP1
+            distance = 10.0
             tp2_dist = 15.0
             tp3_dist = 20.0
             if direction == "SELL":
@@ -297,7 +297,7 @@ def generate_dual_signals(symbol):
                 tp2 = entry - tp2_dist
                 tp3 = entry - tp3_dist
                 tp4 = "Open"
-            else:  # BUY
+            else:
                 entry = zone["low"]
                 sl = entry - distance
                 tp1 = entry + distance
@@ -305,7 +305,6 @@ def generate_dual_signals(symbol):
                 tp3 = entry + tp3_dist
                 tp4 = "Open"
         else:
-            # Default untuk pair lain: gunakan lebar zona, batasi SL maks 100 pip untuk XAUUSD diabaikan
             zone_width = zone["high"] - zone["low"]
             if direction == "SELL":
                 entry = zone["high"]
@@ -363,8 +362,9 @@ if "logged_in" not in st.session_state:
     st.session_state.role = None
     st.session_state.nama = None
     st.session_state.pair = "XAUUSD"
-    st.session_state.sell_touched = False
-    st.session_state.buy_touched = False
+    # Ganti sell_touched / buy_touched dengan triggered_orders list
+    st.session_state.triggered_orders = []  # list of dict
+    st.session_state.trigger_counter = 0   # untuk unique id
 
 st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
 init_db()
@@ -375,6 +375,7 @@ st.markdown("""
 .sell-card {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
 .buy-card {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
 .running {border:2px dashed #ffff00 !important}
+.triggered-card {background:#1a1a2e; border:2px solid #ffaa00; border-radius:20px; padding:20px; margin:10px 0; color:#fff}
 .details {background:#1a1a2e;border-radius:15px;padding:15px;margin-top:10px}
 </style>
 """, unsafe_allow_html=True)
@@ -506,6 +507,7 @@ else:
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
 
+    # Pilih Pair
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -514,7 +516,10 @@ else:
     else:
         pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
     pair = st.selectbox("Pair", pairs, index=pairs.index(st.session_state.pair) if st.session_state.pair in pairs else 0)
-    st.session_state.pair = pair
+    if pair != st.session_state.pair:
+        # Reset triggered orders saat ganti pair
+        st.session_state.triggered_orders = []
+        st.session_state.pair = pair
 
     sell_sig, buy_sig, bias = generate_dual_signals(pair)
 
@@ -530,12 +535,76 @@ else:
         return None
 
     live_price = get_live_price(pair)
-    if live_price is not None:
-        if sell_sig and not st.session_state.sell_touched and live_price >= sell_sig["entry"]:
-            st.session_state.sell_touched = True
-        if buy_sig and not st.session_state.buy_touched and live_price <= buy_sig["entry"]:
-            st.session_state.buy_touched = True
 
+    # === MANAGE TRIGGERED ORDERS ===
+    # Check existing triggered orders for SL/TP hit
+    if live_price is not None:
+        to_remove = []
+        for order in st.session_state.triggered_orders:
+            if order["status"] != "running":
+                continue
+            # Check SL: for BUY, if price <= sl; for SELL, if price >= sl
+            # Check TP3 (max target): for BUY, price >= tp3; for SELL, price <= tp3
+            if order["direction"] == "BUY":
+                if live_price <= order["sl"] or live_price >= order["tp3"]:
+                    to_remove.append(order["id"])
+            else:  # SELL
+                if live_price >= order["sl"] or live_price <= order["tp3"]:
+                    to_remove.append(order["id"])
+        # Remove hit orders
+        st.session_state.triggered_orders = [
+            o for o in st.session_state.triggered_orders if o["id"] not in to_remove
+        ]
+
+    # Check if new limit signal triggered (entry touched)
+    if live_price is not None:
+        # For Sell Limit: if price >= entry and not already in triggered_orders with same entry
+        if sell_sig and live_price >= sell_sig["entry"]:
+            # avoid duplicate
+            already_triggered = any(
+                o["direction"] == "SELL" and o["entry"] == sell_sig["entry"] and o["status"] == "running"
+                for o in st.session_state.triggered_orders
+            )
+            if not already_triggered:
+                order = {
+                    "id": f"SELL_{st.session_state.trigger_counter}",
+                    "direction": "SELL",
+                    "entry": sell_sig["entry"],
+                    "sl": sell_sig["sl"],
+                    "tp1": sell_sig["tp1"],
+                    "tp2": sell_sig["tp2"],
+                    "tp3": sell_sig["tp3"],
+                    "tp4": sell_sig["tp4"],
+                    "reason": sell_sig["reason"],
+                    "status": "running",
+                    "pair": pair
+                }
+                st.session_state.triggered_orders.append(order)
+                st.session_state.trigger_counter += 1
+
+        if buy_sig and live_price <= buy_sig["entry"]:
+            already_triggered = any(
+                o["direction"] == "BUY" and o["entry"] == buy_sig["entry"] and o["status"] == "running"
+                for o in st.session_state.triggered_orders
+            )
+            if not already_triggered:
+                order = {
+                    "id": f"BUY_{st.session_state.trigger_counter}",
+                    "direction": "BUY",
+                    "entry": buy_sig["entry"],
+                    "sl": buy_sig["sl"],
+                    "tp1": buy_sig["tp1"],
+                    "tp2": buy_sig["tp2"],
+                    "tp3": buy_sig["tp3"],
+                    "tp4": buy_sig["tp4"],
+                    "reason": buy_sig["reason"],
+                    "status": "running",
+                    "pair": pair
+                }
+                st.session_state.triggered_orders.append(order)
+                st.session_state.trigger_counter += 1
+
+    # Chart
     tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
     tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
     <script src="https://s3.tradingview.com/tv.js"></script>
@@ -543,55 +612,82 @@ else:
     components.html(tv, height=520)
 
     st.markdown("---")
-    st.subheader("🎯 Sinyal Dual Limit Order (Zone Supply & Demand)")
 
+    # ========== LIMIT CARDS ==========
+    st.subheader("🎯 Sinyal Limit Order (Pending)")
     col1, col2 = st.columns(2)
     with col1:
-        if sell_sig:
-            card_class = "sell-card" + (" running" if st.session_state.sell_touched else "")
-            status_text = "🔴 SELL RUNNING" if st.session_state.sell_touched else "🔴 SELL LIMIT (Pending)"
-            tp4_text = f"<p>TP4: {sell_sig['tp4']}</p>" if sell_sig['tp4'] == "Open" else f"<p>TP4: {sell_sig['tp4']:.2f}</p>"
-            st.markdown(f"""
-            <div class='{card_class}'>
-                <h3>{status_text}</h3>
-                <p>ENTRY: {sell_sig['entry']:.2f}</p>
-                <p>SL: {sell_sig['sl']:.2f}</p>
-                <p>TP1: {sell_sig['tp1']:.2f}</p>
-                <p>TP2: {sell_sig['tp2']:.2f}</p>
-                <p>TP3: {sell_sig['tp3']:.2f}</p>
-                {tp4_text}
-                <div class='details'><small>{sell_sig['reason']}</small></div>
-            </div>""", unsafe_allow_html=True)
+        # SELL LIMIT CARD
+        # Jika ada triggered running SELL, maka tampilkan "Waiting new Sell Limit"
+        active_sell_trigger = any(o["direction"] == "SELL" and o["status"] == "running" for o in st.session_state.triggered_orders)
+        if active_sell_trigger:
+            st.markdown("""<div class='sell-card'><h3>🟡 Waiting new SELL LIMIT</h3><p>Zona supply belum valid / sedang menunggu setup baru.</p></div>""", unsafe_allow_html=True)
         else:
-            st.info("Tidak ada supply zone valid di atas harga.")
+            if sell_sig:
+                st.markdown(f"""
+                <div class='sell-card'>
+                    <h3>🔴 SELL LIMIT (Pending)</h3>
+                    <p>ENTRY: {sell_sig['entry']:.2f}</p>
+                    <p>SL: {sell_sig['sl']:.2f}</p>
+                    <p>TP1: {sell_sig['tp1']:.2f}</p>
+                    <p>TP2: {sell_sig['tp2']:.2f}</p>
+                    <p>TP3: {sell_sig['tp3']:.2f}</p>
+                    <p>TP4: {sell_sig['tp4']}</p>
+                    <div class='details'><small>{sell_sig['reason']}</small></div>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.info("Tidak ada supply zone valid di atas harga.")
 
     with col2:
-        if buy_sig:
-            card_class = "buy-card" + (" running" if st.session_state.buy_touched else "")
-            status_text = "🟢 BUY RUNNING" if st.session_state.buy_touched else "🟢 BUY LIMIT (Pending)"
-            tp4_text = f"<p>TP4: {buy_sig['tp4']}</p>" if buy_sig['tp4'] == "Open" else f"<p>TP4: {buy_sig['tp4']:.2f}</p>"
-            st.markdown(f"""
-            <div class='{card_class}'>
-                <h3>{status_text}</h3>
-                <p>ENTRY: {buy_sig['entry']:.2f}</p>
-                <p>SL: {buy_sig['sl']:.2f}</p>
-                <p>TP1: {buy_sig['tp1']:.2f}</p>
-                <p>TP2: {buy_sig['tp2']:.2f}</p>
-                <p>TP3: {buy_sig['tp3']:.2f}</p>
-                {tp4_text}
-                <div class='details'><small>{buy_sig['reason']}</small></div>
-            </div>""", unsafe_allow_html=True)
+        # BUY LIMIT CARD
+        active_buy_trigger = any(o["direction"] == "BUY" and o["status"] == "running" for o in st.session_state.triggered_orders)
+        if active_buy_trigger:
+            st.markdown("""<div class='buy-card'><h3>🟡 Waiting new BUY LIMIT</h3><p>Zona demand belum valid / sedang menunggu setup baru.</p></div>""", unsafe_allow_html=True)
         else:
-            st.info("Tidak ada demand zone valid di bawah harga.")
+            if buy_sig:
+                st.markdown(f"""
+                <div class='buy-card'>
+                    <h3>🟢 BUY LIMIT (Pending)</h3>
+                    <p>ENTRY: {buy_sig['entry']:.2f}</p>
+                    <p>SL: {buy_sig['sl']:.2f}</p>
+                    <p>TP1: {buy_sig['tp1']:.2f}</p>
+                    <p>TP2: {buy_sig['tp2']:.2f}</p>
+                    <p>TP3: {buy_sig['tp3']:.2f}</p>
+                    <p>TP4: {buy_sig['tp4']}</p>
+                    <div class='details'><small>{buy_sig['reason']}</small></div>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.info("Tidak ada demand zone valid di bawah harga.")
 
-    if st.session_state.sell_touched or st.session_state.buy_touched:
-        st.warning("⚡ Ada sinyal yang sedang **RUNNING**. Pantau pergerakan harga.")
+    # ========== TRIGGERED ORDERS SECTION ==========
+    running_orders = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
+    if running_orders:
+        st.markdown("---")
+        st.subheader("⚡ Active Triggered Orders")
+        for order in running_orders:
+            direction = order["direction"]
+            cls = "sell-card" if direction == "SELL" else "buy-card"
+            emoji = "🔴" if direction == "SELL" else "🟢"
+            tp4_str = f"<p>TP4: {order['tp4']}</p>" if order['tp4'] == "Open" else f"<p>TP4: {order['tp4']:.2f}</p>"
+            st.markdown(f"""
+            <div class='triggered-card'>
+                <h3>{emoji} {direction} RUNNING</h3>
+                <p>ENTRY: {order['entry']:.2f}</p>
+                <p>SL: {order['sl']:.2f}</p>
+                <p>TP1: {order['tp1']:.2f}</p>
+                <p>TP2: {order['tp2']:.2f}</p>
+                <p>TP3: {order['tp3']:.2f}</p>
+                {tp4_str}
+                <div class='details'><small>{order['reason']}</small></div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    if st.button("🔄 Reset Status Running"):
-        st.session_state.sell_touched = False
-        st.session_state.buy_touched = False
+    # Tombol reset manual (optional, untuk clear semua triggered orders)
+    if st.button("🗑️ Clear All Triggered Orders"):
+        st.session_state.triggered_orders = []
         st.rerun()
 
+    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
