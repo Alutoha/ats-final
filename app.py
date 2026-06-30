@@ -274,7 +274,6 @@ def generate_dual_signals(symbol):
         price = 2650
         atr = 10
 
-    # Zona terdekat dalam jarak 2x ATR
     best_supply = None
     for zone in supply_zones:
         if zone["high"] > price and (zone["high"] - price) < 2 * atr:
@@ -289,22 +288,19 @@ def generate_dual_signals(symbol):
     def calc_signal(direction, zone, price):
         if direction == "SELL":
             entry = zone["high"]
-            sl = zone["low"]
-            distance = entry - sl
-            # Batasi SL maksimum 100 pip (1.0) untuk XAUUSD
+            distance = zone["high"] - zone["low"]
             if symbol == "XAUUSD" and distance > 1.0:
-                sl = entry - 1.0
                 distance = 1.0
+            sl = entry + distance
             tp1 = entry - distance
             tp2 = entry - distance * 2
             tp3 = entry - distance * 3
         else:  # BUY
             entry = zone["low"]
-            sl = zone["high"]
-            distance = sl - entry
+            distance = zone["high"] - zone["low"]
             if symbol == "XAUUSD" and distance > 1.0:
-                sl = entry + 1.0
                 distance = 1.0
+            sl = entry - distance
             tp1 = entry + distance
             tp2 = entry + distance * 2
             tp3 = entry + distance * 3
@@ -491,7 +487,6 @@ else:
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
 
-    # Pilih Pair
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -502,10 +497,8 @@ else:
     pair = st.selectbox("Pair", pairs, index=pairs.index(st.session_state.pair) if st.session_state.pair in pairs else 0)
     st.session_state.pair = pair
 
-    # Sinyal
     sell_sig, buy_sig, bias = generate_dual_signals(pair)
 
-    # Deteksi running
     @st.cache_data(ttl=60)
     def get_live_price(symbol):
         ticker = SYMBOL_MAP.get(symbol, "GC=F")
@@ -524,7 +517,6 @@ else:
         if buy_sig and not st.session_state.buy_touched and live_price <= buy_sig["entry"]:
             st.session_state.buy_touched = True
 
-    # Chart TradingView di atas
     tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
     tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
     <script src="https://s3.tradingview.com/tv.js"></script>
@@ -569,17 +561,14 @@ else:
         else:
             st.info("Tidak ada demand zone valid di bawah harga.")
 
-    # Running status
     if st.session_state.sell_touched or st.session_state.buy_touched:
         st.warning("⚡ Ada sinyal yang sedang **RUNNING**. Pantau pergerakan harga.")
 
-    # Tombol reset
     if st.button("🔄 Reset Status Running"):
         st.session_state.sell_touched = False
         st.session_state.buy_touched = False
         st.rerun()
 
-    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
