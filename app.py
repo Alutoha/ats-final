@@ -276,34 +276,34 @@ def generate_dual_signals(symbol):
 
     best_supply = None
     for zone in supply_zones:
-        if zone["high"] > price and (zone["high"] - price) < 2 * atr:
+        if zone["high"] > price and (zone["high"] - price) < 3 * atr:
             if best_supply is None or zone["high"] < best_supply["high"]:
                 best_supply = zone
     best_demand = None
     for zone in demand_zones:
-        if zone["low"] < price and (price - zone["low"]) < 2 * atr:
+        if zone["low"] < price and (price - zone["low"]) < 3 * atr:
             if best_demand is None or zone["low"] > best_demand["low"]:
                 best_demand = zone
 
     def calc_signal(direction, zone, price):
         if direction == "SELL":
             entry = zone["high"]
-            distance = zone["high"] - zone["low"]
-            if symbol == "XAUUSD" and distance > 1.0:
-                distance = 1.0
-            sl = entry + distance
-            tp1 = entry - distance
-            tp2 = entry - distance * 2
-            tp3 = entry - distance * 3
+            zone_width = zone["high"] - zone["low"]
+            if symbol == "XAUUSD" and zone_width > 1.0:
+                zone_width = 1.0
+            sl = entry + zone_width          # SL di atas entry
+            tp1 = entry - zone_width        # TP1 1:1
+            tp2 = entry - zone_width * 2    # TP2 1:2
+            tp3 = entry - zone_width * 3    # TP3 1:3
         else:  # BUY
             entry = zone["low"]
-            distance = zone["high"] - zone["low"]
-            if symbol == "XAUUSD" and distance > 1.0:
-                distance = 1.0
-            sl = entry - distance
-            tp1 = entry + distance
-            tp2 = entry + distance * 2
-            tp3 = entry + distance * 3
+            zone_width = zone["high"] - zone["low"]
+            if symbol == "XAUUSD" and zone_width > 1.0:
+                zone_width = 1.0
+            sl = entry - zone_width          # SL di bawah entry
+            tp1 = entry + zone_width        # TP1 1:1
+            tp2 = entry + zone_width * 2    # TP2 1:2
+            tp3 = entry + zone_width * 3    # TP3 1:3
         return entry, sl, tp1, tp2, tp3
 
     sell_signal = None
@@ -535,10 +535,10 @@ else:
             <div class='{card_class}'>
                 <h3>{status_text}</h3>
                 <p>ENTRY: {sell_sig['entry']:.2f}</p>
-                <p>SL: {sell_sig['sl']:.2f}</p>
-                <p>TP1: {sell_sig['tp1']:.2f}</p>
-                <p>TP2: {sell_sig['tp2']:.2f}</p>
-                <p>TP3: {sell_sig['tp3']:.2f}</p>
+                <p>SL: {sell_sig['sl']:.2f} (di atas entry)</p>
+                <p>TP1: {sell_sig['tp1']:.2f} (1:1)</p>
+                <p>TP2: {sell_sig['tp2']:.2f} (1:2)</p>
+                <p>TP3: {sell_sig['tp3']:.2f} (1:3)</p>
                 <div class='details'><small>{sell_sig['reason']}</small></div>
             </div>""", unsafe_allow_html=True)
         else:
@@ -552,10 +552,10 @@ else:
             <div class='{card_class}'>
                 <h3>{status_text}</h3>
                 <p>ENTRY: {buy_sig['entry']:.2f}</p>
-                <p>SL: {buy_sig['sl']:.2f}</p>
-                <p>TP1: {buy_sig['tp1']:.2f}</p>
-                <p>TP2: {buy_sig['tp2']:.2f}</p>
-                <p>TP3: {buy_sig['tp3']:.2f}</p>
+                <p>SL: {buy_sig['sl']:.2f} (di bawah entry)</p>
+                <p>TP1: {buy_sig['tp1']:.2f} (1:1)</p>
+                <p>TP2: {buy_sig['tp2']:.2f} (1:2)</p>
+                <p>TP3: {buy_sig['tp3']:.2f} (1:3)</p>
                 <div class='details'><small>{buy_sig['reason']}</small></div>
             </div>""", unsafe_allow_html=True)
         else:
