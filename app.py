@@ -267,10 +267,11 @@ def price_action_signal(df):
             return "SELL", "Inside Bar (Bearish Cont.)"
     return None, None
 
-# ==================== ANALISIS + TP2 OTOMATIS ====================
-def full_ict_analysis(symbol):
+# ==================== ANALISIS + SINYAL OTOMATIS ====================
+def auto_signal(symbol):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
+        # Fallback agresif
         return {
             "signal": "BUY",
             "entry": 2650,
@@ -281,7 +282,7 @@ def full_ict_analysis(symbol):
             "reasons": ["⚠️ Fallback sinyal (data tidak lengkap)"],
             "price": 2650,
             "is_pending": True
-        }, None
+        }
 
     # ----- BIAS HARIAN -----
     daily_df = dfs.get("1d")
@@ -301,7 +302,7 @@ def full_ict_analysis(symbol):
         daily_high = 2700
         daily_low = 2600
 
-    # ----- ENTRY DARI M15 / M5 / H1 (tanpa error) -----
+    # ----- ENTRY DARI M15 / M5 / H1 -----
     entry_df = None
     for tf in ["15m", "5m", "1h"]:
         df_candidate = dfs.get(tf)
@@ -314,26 +315,33 @@ def full_ict_analysis(symbol):
         sl_distance = 10
     else:
         price = entry_df["Close"].iloc[-1]
+        # ATR 14
         atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
         if pd.isna(atr) or atr == 0:
             atr = price * 0.002
         sl_distance = atr * 1.5
 
-    # ----- HITUNG TP2 OTOMATIS -----
+    # ----- ATURAN SL KHUSUS XAUUSD -----
+    if symbol == "XAUUSD":
+        # Maksimal SL 100 pip = 10 USD, minimal 2 USD
+        sl_distance = min(sl_distance, 10.0)
+        sl_distance = max(sl_distance, 2.0)
+
+    # ----- HITUNG TP1 (1:1) & TP2 (OTOMATIS 1:2.0-2.5) -----
     if bias == "BUY":
         entry = price
         stop_loss = entry - sl_distance
-        tp1 = entry + sl_distance * 1.5
+        tp1 = entry + sl_distance  # 1:1
         max_rr = (daily_high - entry) / sl_distance if sl_distance > 0 else 2.0
         tp2_mult = max(2.0, min(2.5, max_rr))
         tp2 = entry + sl_distance * tp2_mult
         tp3 = daily_high
         if tp3 <= tp2:
             tp3 = tp2 + sl_distance * 0.5
-    else:
+    else:  # SELL
         entry = price
         stop_loss = entry + sl_distance
-        tp1 = entry - sl_distance * 1.5
+        tp1 = entry - sl_distance  # 1:1
         max_rr = (entry - daily_low) / sl_distance if sl_distance > 0 else 2.0
         tp2_mult = max(2.0, min(2.5, max_rr))
         tp2 = entry - sl_distance * tp2_mult
@@ -341,7 +349,7 @@ def full_ict_analysis(symbol):
         if tp3 >= tp2:
             tp3 = tp2 - sl_distance * 0.5
 
-    reasons = [f"✅ Bias {bias}", f"📌 TP2 auto 1:{tp2_mult:.1f}", "📌 Target harian"]
+    reasons = [f"✅ Bias {bias}", f"📌 SL {sl_distance:.2f} USD", f"📌 TP1 (1:1)", f"📌 TP2 (1:{tp2_mult:.1f})"]
     return {
         "signal": bias,
         "entry": entry,
@@ -352,15 +360,15 @@ def full_ict_analysis(symbol):
         "reasons": reasons,
         "price": price,
         "is_pending": False
-    }, None
+    }
 
 # ==================== SESSION STATE ====================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.role = None
     st.session_state.nama = None
-    st.session_state.page = "analisa"
-    st.session_state.result = None
+    st.session_state.pair = "XAUUSD"
+    st.session_state.signal = None
 
 st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
 init_db()
@@ -494,12 +502,6 @@ else:
         """, height=60)
         
         st.markdown(f"<p style='color:#888;'>{datetime.now().strftime('%A, %d %B %Y')}</p>", unsafe_allow_html=True)
-        if st.button("📊 ANALISA", use_container_width=True):
-            st.session_state.page = "analisa"
-            st.rerun()
-        if st.button("🎯 SINYAL", use_container_width=True):
-            st.session_state.page = "sinyal"
-            st.rerun()
         conn = get_conn()
         c = conn.cursor()
         c.execute("SELECT expired_date, is_trial FROM users WHERE nama=?", (st.session_state.nama,))
@@ -517,6 +519,7 @@ else:
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
     
+    # Pilih Pair (otomatis update sinyal)
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -524,51 +527,41 @@ else:
         pairs = ["EURUSD","GBPUSD","USDJPY","AUDUSD","NZDUSD","USDCAD","USDCHF"]
     else:
         pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
-    pair = st.selectbox("Pair", pairs)
+    pair = st.selectbox("Pair", pairs, index=0 if st.session_state.pair not in pairs else pairs.index(st.session_state.pair))
 
-    if st.session_state.page == "analisa":
-        tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
-        tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
-        <script src="https://s3.tradingview.com/tv.js"></script>
-        <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
-        components.html(tv, height=520)
-        
-        st.markdown("---")
-        if st.button("🔍 ANALISA SEKARANG", use_container_width=True):
-            with st.spinner("Menghitung sinyal + TP2 otomatis..."):
-                res, err = full_ict_analysis(pair)
-            if err:
-                st.error(err)
-            else:
-                st.session_state.result = res
-                st.session_state.page = "sinyal"
-                st.rerun()
+    # Trigger analisa jika pair berubah
+    if pair != st.session_state.pair or st.session_state.signal is None:
+        with st.spinner("Menganalisa..."):
+            st.session_state.signal = auto_signal(pair)
+        st.session_state.pair = pair
 
-    else:
-        if st.button("⬅️ Kembali ke Chart"):
-            st.session_state.page = "analisa"
-            st.rerun()
-        res = st.session_state.result
-        if res:
-            sig = res["signal"]
-            is_pending = res.get("is_pending", False)
-            cls = "signal-buy" if sig=="BUY" else "signal-sell"
-            if is_pending:
-                cls += " pending"
-            emj = "🟢" if sig=="BUY" else "🔴"
-            title = "📌 PENDING LIMIT" if is_pending else "📈 SINYAL + TP2 OTOMATIS"
-            st.markdown(f"<div class='{cls}'><p>{title}</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
-            
-            st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p>"
-                        f"<p>🎯 TP1 (1:1.5) : {res['tp1']:.2f}</p>"
-                        f"<p>🎯 TP2 (AUTO 1:2.0-2.5) : {res['tp2']:.2f}</p>"
-                        f"<p>🎯 TP3 (Harian) : {res['tp3']:.2f}</p></div>", unsafe_allow_html=True)
-            
-            st.markdown("### 📝 Alasan")
-            st.markdown(f"<div style='background:#1a1a2e;border-radius:15px;padding:20px;color:#ccc'><ul>{''.join(f'<li>{r}</li>' for r in res['reasons'])}</ul></div>", unsafe_allow_html=True)
-        else:
-            st.info("Klik ANALISA SEKARANG di halaman Chart")
+    # Tampilkan Chart
+    tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
+    tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
+    <script src="https://s3.tradingview.com/tv.js"></script>
+    <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
+    components.html(tv, height=520)
+
+    # Tampilkan Sinyal
+    res = st.session_state.signal
+    if res:
+        sig = res["signal"]
+        cls = "signal-buy" if sig=="BUY" else "signal-sell"
+        if res.get("is_pending"):
+            cls += " pending"
+        emj = "🟢" if sig=="BUY" else "🔴"
+        title = "📌 PENDING LIMIT" if res.get("is_pending") else "📈 SINYAL REAL-TIME"
+        st.markdown(f"<div class='{cls}'><p>{title}</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
         
+        st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p>"
+                    f"<p>🎯 TP1 (1:1) : {res['tp1']:.2f}</p>"
+                    f"<p>🎯 TP2 (AUTO 1:2.0-2.5) : {res['tp2']:.2f}</p>"
+                    f"<p>🎯 TP3 (Harian) : {res['tp3']:.2f}</p></div>", unsafe_allow_html=True)
+        
+        st.markdown("### 📝 Alasan")
+        st.markdown(f"<div style='background:#1a1a2e;border-radius:15px;padding:20px;color:#ccc'><ul>{''.join(f'<li>{r}</li>' for r in res['reasons'])}</ul></div>", unsafe_allow_html=True)
+
+    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
