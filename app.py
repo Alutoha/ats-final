@@ -11,7 +11,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-# ==================== PASSWORD HASHING (NO BCRYPT) ====================
+# ==================== PASSWORD HASHING ====================
 def hash_password(password):
     salt = os.urandom(32)
     key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
@@ -168,13 +168,9 @@ def fetch_data(symbol, interval, period="7d"):
 
 @st.cache_data(ttl=300)
 def fetch_all_timeframes(symbol):
-    """Ambil data semua timeframe yang diperlukan, resample jika perlu."""
+    """Ambil data semua timeframe yang diperlukan."""
     result = {}
-    # Weekly
-    df = fetch_data(symbol, "1wk", "6mo")
-    if df is not None:
-        result["1wk"] = df
-    # Daily
+    # Daily (paling penting)
     df = fetch_data(symbol, "1d", "3mo")
     if df is not None:
         result["1d"] = df
@@ -275,34 +271,29 @@ def price_action_signal(df):
 def full_ict_analysis(symbol):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
-        return None, "Gagal mengambil data dari Yahoo Finance."
+        return None, "Gagal mengambil data. Periksa koneksi atau coba pair lain."
     
-    # Tentukan bias dari Weekly, Daily, atau H4 (yang tersedia)
-    bias_df = dfs.get("1wk")
-    if bias_df is None:
-        bias_df = dfs.get("1d")
-    if bias_df is None:
-        bias_df = dfs.get("4h")
-    if bias_df is None or len(bias_df) < 5:
+    # Bias dari Daily atau H4
+    bias_df = dfs.get("1d") or dfs.get("4h")
+    if bias_df is None or len(bias_df) < 10:
         return None, "Data timeframe tinggi tidak cukup."
     
-    sh_b, sl_b = find_swings(bias_df, 3)
+    sh_b, sl_b = find_swings(bias_df, 2)
     bull, bear = detect_bos(bias_df, sh_b, sl_b)
     if bull and not bear:
         bias = "BUY"
     elif bear and not bull:
         bias = "SELL"
     else:
+        # Fallback: tren sederhana
         if len(bias_df) >= 20:
             sma20 = bias_df["Close"].rolling(20).mean().iloc[-1]
             bias = "BUY" if bias_df["Close"].iloc[-1] > sma20 else "SELL"
         else:
-            bias = "SELL" if bias_df["Close"].iloc[-1] < bias_df["Close"].iloc[0] else "BUY"
+            bias = "BUY" if bias_df["Close"].iloc[-1] > bias_df["Close"].iloc[0] else "SELL"
     
     # Zona dari H4 atau H1
-    zone_df = dfs.get("4h")
-    if zone_df is None:
-        zone_df = dfs.get("1h")
+    zone_df = dfs.get("4h") or dfs.get("1h")
     if zone_df is None:
         zone_df = bias_df
     
@@ -323,12 +314,10 @@ def full_ict_analysis(symbol):
         else:
             zones.append({"type": "supply_fvg", "high": fvg_z["top"], "low": fvg_z["bottom"]})
     
-    # Entry dari M15 atau M5
-    entry_df = dfs.get("15m")
+    # Entry: M15 > M5 > H1
+    entry_df = dfs.get("15m") or dfs.get("5m") or dfs.get("1h")
     if entry_df is None:
-        entry_df = dfs.get("5m")
-    if entry_df is None:
-        return None, "Data timeframe rendah tidak tersedia."
+        return None, "Data entry tidak tersedia."
     
     sh_e, sl_e = find_swings(entry_df, 1)
     sweep = find_liquidity_sweep(entry_df, sh_e, sl_e)
@@ -338,8 +327,9 @@ def full_ict_analysis(symbol):
     signal = None
     reasons = []
     entry_price = sl_price = None
+    is_pending = False  # tanda apakah ini sinyal pending limit
     
-    def near_zone(price, zone, threshold=0.008):
+    def near_zone(price, zone, threshold=0.015):  # diperlebar ke 1.5%
         return abs(price - zone["low"]) / price < threshold or abs(price - zone["high"]) / price < threshold
     
     valid_zones = [z for z in zones if (bias == "BUY" and "demand" in z["type"]) or (bias == "SELL" and "supply" in z["type"])]
@@ -358,10 +348,28 @@ def full_ict_analysis(symbol):
                     reasons = [f"✅ Bias Bullish", f"✅ {pa_desc} di Demand Zone"]
                     signal = "BUY"
                     break
-        if not signal and pa_sig == "BUY":
+        # Fallback Pending Limit Order di zona demand terdekat
+        if not signal and valid_zones:
+            for zone in valid_zones:
+                if zone["type"] == "demand" and price > zone["low"]:
+                    entry_price = zone["high"] + 0.01
+                    sl_price = zone["low"] - 0.01
+                    reasons = [f"📌 Bias Bullish", "📌 PULLBACK ke Demand Zone", "📌 Pending Buy Limit"]
+                    signal = "BUY"
+                    is_pending = True
+                    break
+                elif zone["type"] == "demand_fvg" and price > zone["low"]:
+                    entry_price = zone["high"]
+                    sl_price = zone["bottom"]
+                    reasons = [f"📌 Bias Bullish", "📌 PULLBACK ke Demand FVG", "📌 Pending Buy Limit"]
+                    signal = "BUY"
+                    is_pending = True
+                    break
+        # Terakhir, sinyal agresif
+        if not signal:
             entry_price = price
-            sl_price = entry_df["Low"].iloc[-1] - 0.5
-            reasons = [f"✅ Bias Bullish", f"✅ {pa_desc}"]
+            sl_price = min(entry_df["Low"].iloc[-5:]) - 0.5
+            reasons = ["⚠️ Bias Bullish", "⚠️ Entry agresif (no setup)", "⚠️ Pantau terus"]
             signal = "BUY"
     else:
         if sweep and sweep[0] == 'sell':
@@ -377,10 +385,26 @@ def full_ict_analysis(symbol):
                     reasons = [f"✅ Bias Bearish", f"✅ {pa_desc} di Supply Zone"]
                     signal = "SELL"
                     break
-        if not signal and pa_sig == "SELL":
+        if not signal and valid_zones:
+            for zone in valid_zones:
+                if zone["type"] == "supply" and price < zone["high"]:
+                    entry_price = zone["low"] - 0.01
+                    sl_price = zone["high"] + 0.01
+                    reasons = [f"📌 Bias Bearish", "📌 PULLBACK ke Supply Zone", "📌 Pending Sell Limit"]
+                    signal = "SELL"
+                    is_pending = True
+                    break
+                elif zone["type"] == "supply_fvg" and price < zone["top"]:
+                    entry_price = zone["low"]
+                    sl_price = zone["top"]
+                    reasons = [f"📌 Bias Bearish", "📌 PULLBACK ke Supply FVG", "📌 Pending Sell Limit"]
+                    signal = "SELL"
+                    is_pending = True
+                    break
+        if not signal:
             entry_price = price
-            sl_price = entry_df["High"].iloc[-1] + 0.5
-            reasons = [f"✅ Bias Bearish", f"✅ {pa_desc}"]
+            sl_price = max(entry_df["High"].iloc[-5:]) + 0.5
+            reasons = ["⚠️ Bias Bearish", "⚠️ Entry agresif (no setup)", "⚠️ Pantau terus"]
             signal = "SELL"
     
     if not signal:
@@ -399,7 +423,8 @@ def full_ict_analysis(symbol):
         "tp2": tp2,
         "tp3": tp3,
         "reasons": reasons,
-        "price": price
+        "price": price,
+        "is_pending": is_pending
     }, None
 
 # ==================== SESSION STATE ====================
@@ -419,6 +444,7 @@ st.markdown("""
 .stApp {background:#0E1117}
 .signal-buy {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:30px;text-align:center;margin:20px 0}
 .signal-sell {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444}
+.pending {border:2px dashed #ffaa00 !important}
 .signal-buy h1 {color:#00ff88;font-size:48px}
 .signal-sell h1 {color:#ff4444}
 .details {background:#1a1a2e;border-radius:15px;padding:20px;margin:15px 0;text-align:left}
@@ -579,7 +605,6 @@ else:
     pair = st.selectbox("Pair", pairs)
 
     if st.session_state.page == "analisa":
-        # Chart TradingView 15 menit
         tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
         tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
         <script src="https://s3.tradingview.com/tv.js"></script>
@@ -604,9 +629,13 @@ else:
         res = st.session_state.result
         if res:
             sig = res["signal"]
+            is_pending = res.get("is_pending", False)
             cls = "signal-buy" if sig=="BUY" else "signal-sell"
+            if is_pending:
+                cls += " pending"
             emj = "🟢" if sig=="BUY" else "🔴"
-            st.markdown(f"<div class='{cls}'><p>📈 SINYAL ICT MULTI-TF</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
+            title = "📌 PENDING LIMIT ORDER" if is_pending else "📈 SINYAL ICT MULTI-TF"
+            st.markdown(f"<div class='{cls}'><p>{title}</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
             
             st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p>"
                         f"<p>🎯 TP1 (Scalping) : {res['tp1']:.2f}</p><p>🎯 TP2 (Intraday) : {res['tp2']:.2f}</p>"
