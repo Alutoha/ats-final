@@ -172,22 +172,25 @@ def fetch_all_timeframes(symbol):
     result = {}
     # Weekly
     df = fetch_data(symbol, "1wk", "6mo")
-    if df is not None: result["1wk"] = df
+    if df is not None:
+        result["1wk"] = df
     # Daily
     df = fetch_data(symbol, "1d", "3mo")
-    if df is not None: result["1d"] = df
-    # H4 (resample dari 1h)
+    if df is not None:
+        result["1d"] = df
+    # H4 & H1
     df = fetch_data(symbol, "1h", "1mo")
     if df is not None:
         df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
         result["4h"] = df_h4
-        result["1h"] = df  # simpan juga 1h
-    # M15
+        result["1h"] = df
+    # M15 & M5
     df = fetch_data(symbol, "15m", "60d")
-    if df is not None: result["15m"] = df
-    # M5
+    if df is not None:
+        result["15m"] = df
     df = fetch_data(symbol, "5m", "60d")
-    if df is not None: result["5m"] = df
+    if df is not None:
+        result["5m"] = df
     return result
 
 # ==================== TECHNICAL FUNCTIONS ====================
@@ -274,8 +277,12 @@ def full_ict_analysis(symbol):
     if not dfs:
         return None, "Gagal mengambil data dari Yahoo Finance."
     
-    # Tentukan bias dari Weekly atau Daily (yang tersedia)
-    bias_df = dfs.get("1wk") or dfs.get("1d")
+    # Tentukan bias dari Weekly, Daily, atau H4 (yang tersedia)
+    bias_df = dfs.get("1wk")
+    if bias_df is None:
+        bias_df = dfs.get("1d")
+    if bias_df is None:
+        bias_df = dfs.get("4h")
     if bias_df is None or len(bias_df) < 5:
         return None, "Data timeframe tinggi tidak cukup."
     
@@ -286,17 +293,18 @@ def full_ict_analysis(symbol):
     elif bear and not bull:
         bias = "SELL"
     else:
-        # Fallback tren
         if len(bias_df) >= 20:
             sma20 = bias_df["Close"].rolling(20).mean().iloc[-1]
             bias = "BUY" if bias_df["Close"].iloc[-1] > sma20 else "SELL"
         else:
             bias = "SELL" if bias_df["Close"].iloc[-1] < bias_df["Close"].iloc[0] else "BUY"
     
-    # Zona dari H4 (atau H1 sebagai cadangan)
-    zone_df = dfs.get("4h") or dfs.get("1h")
+    # Zona dari H4 atau H1
+    zone_df = dfs.get("4h")
     if zone_df is None:
-        zone_df = bias_df  # fallback
+        zone_df = dfs.get("1h")
+    if zone_df is None:
+        zone_df = bias_df
     
     sh_z, sl_z = find_swings(zone_df, 2)
     zones = []
@@ -315,8 +323,10 @@ def full_ict_analysis(symbol):
         else:
             zones.append({"type": "supply_fvg", "high": fvg_z["top"], "low": fvg_z["bottom"]})
     
-    # Entry dari M15 (prioritas) atau M5
-    entry_df = dfs.get("15m") or dfs.get("5m")
+    # Entry dari M15 atau M5
+    entry_df = dfs.get("15m")
+    if entry_df is None:
+        entry_df = dfs.get("5m")
     if entry_df is None:
         return None, "Data timeframe rendah tidak tersedia."
     
@@ -353,7 +363,7 @@ def full_ict_analysis(symbol):
             sl_price = entry_df["Low"].iloc[-1] - 0.5
             reasons = [f"✅ Bias Bullish", f"✅ {pa_desc}"]
             signal = "BUY"
-    else:  # SELL
+    else:
         if sweep and sweep[0] == 'sell':
             entry_price = price
             sl_price = entry_df["High"].iloc[sweep[1]] + 0.01
@@ -376,7 +386,6 @@ def full_ict_analysis(symbol):
     if not signal:
         return None, "Tidak ada setup valid."
     
-    # Hitung TP berdasarkan jarak SL
     risk = abs(entry_price - sl_price)
     tp1 = entry_price + risk * 1.5 if signal == "BUY" else entry_price - risk * 1.5
     tp2 = entry_price + risk * 3   if signal == "BUY" else entry_price - risk * 3
@@ -386,9 +395,9 @@ def full_ict_analysis(symbol):
         "signal": signal,
         "entry": entry_price,
         "sl": sl_price,
-        "tp1": tp1,   # scalping
-        "tp2": tp2,   # intraday
-        "tp3": tp3,   # swing
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
         "reasons": reasons,
         "price": price
     }, None
