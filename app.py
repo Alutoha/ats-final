@@ -169,18 +169,15 @@ def fetch_data(symbol, interval, period="7d"):
 @st.cache_data(ttl=300)
 def fetch_all_timeframes(symbol):
     result = {}
-    # Daily
     df = fetch_data(symbol, "1d", "3mo")
     if df is not None and not df.empty:
         result["1d"] = df
-    # H4 & H1
     df = fetch_data(symbol, "1h", "1mo")
     if df is not None and not df.empty:
         df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
         if not df_h4.empty:
             result["4h"] = df_h4
         result["1h"] = df
-    # M15 & M5
     df = fetch_data(symbol, "15m", "60d")
     if df is not None and not df.empty:
         result["15m"] = df
@@ -242,125 +239,113 @@ def find_liquidity_sweep(df, sh, sl):
             return ('sell', last_sh)
     return None
 
-def price_action_signal(df):
-    if len(df) < 3:
-        return None, None
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if (prev["Close"] < prev["Open"] and last["Close"] > last["Open"] and
-        last["Open"] <= prev["Close"] and last["Close"] >= prev["Open"]):
-        return "BUY", "Bullish Engulfing"
-    if (prev["Close"] > prev["Open"] and last["Close"] < last["Open"] and
-        last["Open"] >= prev["Close"] and last["Close"] <= prev["Open"]):
-        return "SELL", "Bearish Engulfing"
-    body = abs(last["Close"] - last["Open"])
-    lower_wick = min(last["Close"], last["Open"]) - last["Low"]
-    upper_wick = last["High"] - max(last["Close"], last["Open"])
-    if lower_wick > body * 2 and upper_wick < body * 0.5:
-        return "BUY", "Hammer"
-    if upper_wick > body * 2 and lower_wick < body * 0.5:
-        return "SELL", "Shooting Star"
-    if last["High"] <= prev["High"] and last["Low"] >= prev["Low"]:
-        if prev["Close"] > prev["Open"]:
-            return "BUY", "Inside Bar (Bullish Cont.)"
-        else:
-            return "SELL", "Inside Bar (Bearish Cont.)"
-    return None, None
-
-# ==================== ANALISIS + SINYAL OTOMATIS ====================
-def auto_signal(symbol):
+# ==================== DUAL-ZONE SIGNAL GENERATOR ====================
+def generate_dual_signals(symbol):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
-        # Fallback agresif
-        return {
-            "signal": "BUY",
-            "entry": 2650,
-            "sl": 2640,
-            "tp1": 2665,
-            "tp2": 2675,
-            "tp3": 2685,
-            "reasons": ["⚠️ Fallback sinyal (data tidak lengkap)"],
-            "price": 2650,
-            "is_pending": True
-        }
+        return None, None, "Data tidak lengkap."
 
-    # ----- BIAS HARIAN -----
+    # Bias dari Daily
     daily_df = dfs.get("1d")
-    if daily_df is not None and not daily_df.empty and len(daily_df) >= 10:
-        sh, sl = find_swings(daily_df, 2)
-        bull, bear = detect_bos(daily_df, sh, sl)
-        if bull:
-            bias = "BUY"
-        elif bear:
-            bias = "SELL"
-        else:
-            bias = "BUY" if daily_df["Close"].iloc[-1] > daily_df["Close"].iloc[-2] else "SELL"
-        daily_high = daily_df["High"].iloc[-1]
-        daily_low = daily_df["Low"].iloc[-1]
-    else:
-        bias = "BUY"
-        daily_high = 2700
-        daily_low = 2600
+    if daily_df is None or len(daily_df) < 10:
+        return None, None, "Data daily tidak cukup."
+    sh_d, sl_d = find_swings(daily_df, 2)
+    bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
+    bias = "BUY" if bull_bias else ("SELL" if bear_bias else "NEUTRAL")
 
-    # ----- ENTRY DARI M15 / M5 / H1 -----
-    entry_df = None
-    for tf in ["15m", "5m", "1h"]:
-        df_candidate = dfs.get(tf)
-        if df_candidate is not None and not df_candidate.empty and len(df_candidate) >= 5:
-            entry_df = df_candidate
-            break
+    # Zona dari H4 atau H1
+    zone_df = dfs.get("4h") or dfs.get("1h")
+    if zone_df is None or len(zone_df) < 10:
+        return None, None, "Data timeframe zona tidak cukup."
+    sh_z, sl_z = find_swings(zone_df, 2)
+    supply_zones = []
+    demand_zones = []
+    for idx in sh_z[-3:]:
+        ob = find_ob(zone_df, "bear", idx)
+        if ob:
+            supply_zones.append(ob)
+    for idx in sl_z[-3:]:
+        ob = find_ob(zone_df, "bull", idx)
+        if ob:
+            demand_zones.append(ob)
+    # FVG sebagai zona tambahan
+    fvg = find_fvg(zone_df)
+    if fvg and fvg["type"] == "bearish":
+        supply_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
+    elif fvg and fvg["type"] == "bullish":
+        demand_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
 
-    if entry_df is None:
+    # Harga saat ini dari M15
+    entry_df = dfs.get("15m") or dfs.get("5m")
+    if entry_df is None or len(entry_df) < 5:
         price = 2650
-        sl_distance = 10
     else:
         price = entry_df["Close"].iloc[-1]
-        # ATR 14
-        atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
-        if pd.isna(atr) or atr == 0:
-            atr = price * 0.002
-        sl_distance = atr * 1.5
 
-    # ----- ATURAN SL KHUSUS XAUUSD -----
-    if symbol == "XAUUSD":
-        # Maksimal SL 100 pip = 10 USD, minimal 2 USD
-        sl_distance = min(sl_distance, 10.0)
-        sl_distance = max(sl_distance, 2.0)
+    # Pilih supply terdekat di atas harga, demand terdekat di bawah harga
+    best_supply = None
+    best_demand = None
+    for zone in supply_zones:
+        if zone["high"] > price:
+            if best_supply is None or zone["high"] < best_supply["high"]:
+                best_supply = zone
+    for zone in demand_zones:
+        if zone["low"] < price:
+            if best_demand is None or zone["low"] > best_demand["low"]:
+                best_demand = zone
 
-    # ----- HITUNG TP1 (1:1) & TP2 (OTOMATIS 1:2.0-2.5) -----
-    if bias == "BUY":
-        entry = price
-        stop_loss = entry - sl_distance
-        tp1 = entry + sl_distance  # 1:1
-        max_rr = (daily_high - entry) / sl_distance if sl_distance > 0 else 2.0
-        tp2_mult = max(2.0, min(2.5, max_rr))
-        tp2 = entry + sl_distance * tp2_mult
-        tp3 = daily_high
-        if tp3 <= tp2:
-            tp3 = tp2 + sl_distance * 0.5
-    else:  # SELL
-        entry = price
-        stop_loss = entry + sl_distance
-        tp1 = entry - sl_distance  # 1:1
-        max_rr = (entry - daily_low) / sl_distance if sl_distance > 0 else 2.0
-        tp2_mult = max(2.0, min(2.5, max_rr))
-        tp2 = entry - sl_distance * tp2_mult
-        tp3 = daily_low
-        if tp3 >= tp2:
-            tp3 = tp2 - sl_distance * 0.5
+    # Hitung SL dan TP
+    def calc_signal(direction, zone, price):
+        if direction == "SELL":
+            entry = zone["high"] + 0.01
+            sl = zone["low"] - 0.01
+            if symbol == "XAUUSD":
+                sl_distance = min(entry - sl, 10.0)
+                sl = entry - sl_distance
+            tp1 = entry - sl_distance * 1.0
+            tp2 = entry - sl_distance * 2.0
+            tp3 = entry - sl_distance * 3.0
+        else:
+            entry = zone["low"] - 0.01
+            sl = zone["high"] + 0.01
+            if symbol == "XAUUSD":
+                sl_distance = min(sl - entry, 10.0)
+                sl = entry + sl_distance
+            tp1 = entry + sl_distance * 1.0
+            tp2 = entry + sl_distance * 2.0
+            tp3 = entry + sl_distance * 3.0
+        return entry, sl, tp1, tp2, tp3
 
-    reasons = [f"✅ Bias {bias}", f"📌 SL {sl_distance:.2f} USD", f"📌 TP1 (1:1)", f"📌 TP2 (1:{tp2_mult:.1f})"]
-    return {
-        "signal": bias,
-        "entry": entry,
-        "sl": stop_loss,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "reasons": reasons,
-        "price": price,
-        "is_pending": False
-    }
+    sell_signal = buy_signal = None
+    if best_supply:
+        entry, sl, tp1, tp2, tp3 = calc_signal("SELL", best_supply, price)
+        sell_signal = {
+            "direction": "SELL",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "zone_high": best_supply["high"],
+            "zone_low": best_supply["low"],
+            "reason": f"Zona supply dari order block bearish H4 di {best_supply['high']:.2f} - {best_supply['low']:.2f}. Konfirmasi: struktur lower high, potensi distribusi.",
+            "status": "pending"
+        }
+    if best_demand:
+        entry, sl, tp1, tp2, tp3 = calc_signal("BUY", best_demand, price)
+        buy_signal = {
+            "direction": "BUY",
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "zone_high": best_demand["high"],
+            "zone_low": best_demand["low"],
+            "reason": f"Zona demand dari order block bullish H4 di {best_demand['high']:.2f} - {best_demand['low']:.2f}. Konfirmasi: akumulasi, pantulan sebelumnya.",
+            "status": "pending"
+        }
+    return sell_signal, buy_signal, bias
 
 # ==================== SESSION STATE ====================
 if "logged_in" not in st.session_state:
@@ -368,7 +353,11 @@ if "logged_in" not in st.session_state:
     st.session_state.role = None
     st.session_state.nama = None
     st.session_state.pair = "XAUUSD"
-    st.session_state.signal = None
+    st.session_state.sell_signal = None
+    st.session_state.buy_signal = None
+    st.session_state.last_price = None
+    st.session_state.sell_touched = False
+    st.session_state.buy_touched = False
 
 st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
 init_db()
@@ -376,14 +365,10 @@ init_db()
 st.markdown("""
 <style>
 .stApp {background:#0E1117}
-.signal-buy {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:30px;text-align:center;margin:20px 0}
-.signal-sell {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444}
-.pending {border:2px dashed #ffaa00 !important}
-.signal-buy h1 {color:#00ff88;font-size:48px}
-.signal-sell h1 {color:#ff4444}
-.details {background:#1a1a2e;border-radius:15px;padding:20px;margin:15px 0;text-align:left}
-.details p {font-size:18px;color:#e0e0e0}
-.stButton>button {border-radius:12px;font-weight:bold;padding:12px 24px}
+.sell-card {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
+.buy-card {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
+.running {border:2px dashed #ffff00 !important}
+.details {background:#1a1a2e;border-radius:15px;padding:15px;margin-top:10px}
 </style>
 """, unsafe_allow_html=True)
 
@@ -392,7 +377,7 @@ if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.markdown("<br><br><h1 style='text-align:center;color:#00ff88;'>📊 ALU TRADING SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>SMC/ICT + TP2 Otomatis</p><br>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>Dual-Zone Limit Signal</p><br>", unsafe_allow_html=True)
         role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -422,7 +407,6 @@ elif st.session_state.role == "admin":
         st.rerun()
     st.title("👑 Admin Panel - Alu Trading System")
     tabs = st.tabs(["➕ Generate Kode", "🎁 Trial 2 Hari", "📋 Daftar User", "⚙️ Ganti Password"])
-    
     with tabs[0]:
         st.subheader("Generate Kode Berbayar")
         c1, c2 = st.columns(2)
@@ -436,7 +420,6 @@ elif st.session_state.role == "admin":
                 st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
             else:
                 st.error("Isi nama & email")
-    
     with tabs[1]:
         st.subheader("Trial 2 Hari")
         c1, c2 = st.columns(2)
@@ -449,7 +432,6 @@ elif st.session_state.role == "admin":
                 st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
             else:
                 st.error("Isi nama & email")
-    
     with tabs[2]:
         st.subheader("Daftar User")
         for u in get_users():
@@ -466,7 +448,6 @@ elif st.session_state.role == "admin":
                 if c2.button("Hapus", key=f"db{uid}"):
                     delete_user(uid)
                     st.rerun()
-    
     with tabs[3]:
         st.subheader("Ganti Password Admin")
         old_pw = st.text_input("Password Lama", type="password")
@@ -500,7 +481,7 @@ else:
         setInterval(updateClock, 1000);
         </script>
         """, height=60)
-        
+
         st.markdown(f"<p style='color:#888;'>{datetime.now().strftime('%A, %d %B %Y')}</p>", unsafe_allow_html=True)
         conn = get_conn()
         c = conn.cursor()
@@ -518,8 +499,8 @@ else:
     st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
     st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
     st.markdown("---")
-    
-    # Pilih Pair (otomatis update sinyal)
+
+    # Pilih Pair
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -527,39 +508,77 @@ else:
         pairs = ["EURUSD","GBPUSD","USDJPY","AUDUSD","NZDUSD","USDCAD","USDCHF"]
     else:
         pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
-    pair = st.selectbox("Pair", pairs, index=0 if st.session_state.pair not in pairs else pairs.index(st.session_state.pair))
+    pair = st.selectbox("Pair", pairs, index=pairs.index(st.session_state.pair) if st.session_state.pair in pairs else 0)
 
-    # Trigger analisa jika pair berubah
-    if pair != st.session_state.pair or st.session_state.signal is None:
-        with st.spinner("Menganalisa..."):
-            st.session_state.signal = auto_signal(pair)
-        st.session_state.pair = pair
+    # Fetch data dan update sinyal saat pair berubah atau setiap refresh
+    sell_sig, buy_sig, bias = generate_dual_signals(pair)
 
-    # Tampilkan Chart
+    # Periksa apakah sinyal tersentuh berdasarkan harga terbaru (dari entry_df)
+    # Kita perlu harga real-time; kita bisa menggunakan fungsi fetch cepat
+    @st.cache_data(ttl=60)
+    def get_live_price(symbol):
+        ticker = SYMBOL_MAP.get(symbol, "GC=F")
+        try:
+            df = yf.download(ticker, period="1d", interval="1m")
+            if not df.empty:
+                return df["Close"].iloc[-1]
+        except:
+            pass
+        return None
+
+    live_price = get_live_price(pair)
+    if live_price:
+        if sell_sig and not st.session_state.sell_touched and live_price >= sell_sig["entry"]:
+            st.session_state.sell_touched = True
+        if buy_sig and not st.session_state.buy_touched and live_price <= buy_sig["entry"]:
+            st.session_state.buy_touched = True
+
+    # Tampilkan sinyal
+    col1, col2 = st.columns(2)
+    with col1:
+        if sell_sig:
+            card_class = "sell-card" + (" running" if st.session_state.sell_touched else "")
+            status_text = "🔴 SELL RUNNING" if st.session_state.sell_touched else "🔴 SELL LIMIT (Pending)"
+            st.markdown(f"<div class='{card_class}'>"
+                        f"<h3>{status_text}</h3>"
+                        f"<p>ENTRY: {sell_sig['entry']:.2f}</p>"
+                        f"<p>SL: {sell_sig['sl']:.2f}</p>"
+                        f"<p>TP1: {sell_sig['tp1']:.2f}</p>"
+                        f"<p>TP2: {sell_sig['tp2']:.2f}</p>"
+                        f"<p>TP3: {sell_sig['tp3']:.2f}</p>"
+                        f"<div class='details'><small>{sell_sig['reason']}</small></div>"
+                        f"</div>", unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada supply zone valid di atas harga.")
+
+    with col2:
+        if buy_sig:
+            card_class = "buy-card" + (" running" if st.session_state.buy_touched else "")
+            status_text = "🟢 BUY RUNNING" if st.session_state.buy_touched else "🟢 BUY LIMIT (Pending)"
+            st.markdown(f"<div class='{card_class}'>"
+                        f"<h3>{status_text}</h3>"
+                        f"<p>ENTRY: {buy_sig['entry']:.2f}</p>"
+                        f"<p>SL: {buy_sig['sl']:.2f}</p>"
+                        f"<p>TP1: {buy_sig['tp1']:.2f}</p>"
+                        f"<p>TP2: {buy_sig['tp2']:.2f}</p>"
+                        f"<p>TP3: {buy_sig['tp3']:.2f}</p>"
+                        f"<div class='details'><small>{buy_sig['reason']}</small></div>"
+                        f"</div>", unsafe_allow_html=True)
+        else:
+            st.info("Tidak ada demand zone valid di bawah harga.")
+
+    # Chart TradingView
     tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
     tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
     <script src="https://s3.tradingview.com/tv.js"></script>
-    <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"studies":["RSI@tv-basicstudies","MACD@tv-basicstudies"],"container_id":"tv"}});</script></div>"""
+    <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"container_id":"tv"}});</script></div>"""
     components.html(tv, height=520)
 
-    # Tampilkan Sinyal
-    res = st.session_state.signal
-    if res:
-        sig = res["signal"]
-        cls = "signal-buy" if sig=="BUY" else "signal-sell"
-        if res.get("is_pending"):
-            cls += " pending"
-        emj = "🟢" if sig=="BUY" else "🔴"
-        title = "📌 PENDING LIMIT" if res.get("is_pending") else "📈 SINYAL REAL-TIME"
-        st.markdown(f"<div class='{cls}'><p>{title}</p><h1>{emj} {sig}</h1><p style='color:#fff'>{pair}</p></div>", unsafe_allow_html=True)
-        
-        st.markdown(f"<div class='details'><p>📍 ENTRY : {res['entry']:.2f}</p><p>🛑 SL : {res['sl']:.2f}</p>"
-                    f"<p>🎯 TP1 (1:1) : {res['tp1']:.2f}</p>"
-                    f"<p>🎯 TP2 (AUTO 1:2.0-2.5) : {res['tp2']:.2f}</p>"
-                    f"<p>🎯 TP3 (Harian) : {res['tp3']:.2f}</p></div>", unsafe_allow_html=True)
-        
-        st.markdown("### 📝 Alasan")
-        st.markdown(f"<div style='background:#1a1a2e;border-radius:15px;padding:20px;color:#ccc'><ul>{''.join(f'<li>{r}</li>' for r in res['reasons'])}</ul></div>", unsafe_allow_html=True)
+    # Tombol reset sinyal tersentuh (opsional)
+    if st.button("🔄 Reset Status Running"):
+        st.session_state.sell_touched = False
+        st.session_state.buy_touched = False
+        st.rerun()
 
     # Footer
     st.markdown("---")
