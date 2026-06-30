@@ -169,18 +169,15 @@ def fetch_data(symbol, interval, period="7d"):
 @st.cache_data(ttl=300)
 def fetch_all_timeframes(symbol):
     result = {}
-    # Daily
     df = fetch_data(symbol, "1d", "3mo")
     if df is not None and not df.empty:
         result["1d"] = df
-    # H4 & H1
     df = fetch_data(symbol, "1h", "1mo")
     if df is not None and not df.empty:
         df_h4 = df.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
         if not df_h4.empty:
             result["4h"] = df_h4
         result["1h"] = df
-    # M15 & M5
     df = fetch_data(symbol, "15m", "60d")
     if df is not None and not df.empty:
         result["15m"] = df
@@ -227,28 +224,12 @@ def find_fvg(df):
         return {"top": prev2["Low"], "bottom": last["High"], "type": "bearish"}
     return None
 
-def find_liquidity_sweep(df, sh, sl):
-    if len(sh) < 1 or len(sl) < 1:
-        return None
-    last_sl = sl[-1]
-    if len(df) >= 5:
-        sweep_low = df['Low'].iloc[-5:].min()
-        if sweep_low < df['Low'].iloc[last_sl] and df['Close'].iloc[-1] > df['Low'].iloc[last_sl]:
-            return ('buy', last_sl)
-    last_sh = sh[-1]
-    if len(df) >= 5:
-        sweep_high = df['High'].iloc[-5:].max()
-        if sweep_high > df['High'].iloc[last_sh] and df['Close'].iloc[-1] < df['High'].iloc[last_sh]:
-            return ('sell', last_sh)
-    return None
-
 # ==================== DUAL-ZONE SIGNAL GENERATOR ====================
 def generate_dual_signals(symbol):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
         return None, None, "Data tidak lengkap."
 
-    # --- 1. BIAS DARI DAILY ---
     daily_df = dfs.get("1d")
     if daily_df is None or not isinstance(daily_df, pd.DataFrame) or daily_df.empty or len(daily_df) < 10:
         return None, None, "Data daily tidak cukup."
@@ -256,7 +237,6 @@ def generate_dual_signals(symbol):
     bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
     bias = "BUY" if bull_bias else ("SELL" if bear_bias else "NEUTRAL")
 
-    # --- 2. ZONA DARI H4 / H1 (fallback berlapis tanpa `or`) ---
     zone_df = dfs.get("4h")
     if zone_df is None or not isinstance(zone_df, pd.DataFrame) or zone_df.empty:
         zone_df = dfs.get("1h")
@@ -267,17 +247,14 @@ def generate_dual_signals(symbol):
     supply_zones = []
     demand_zones = []
 
-    # Order block dari swing high (supply)
     for idx in sh_z[-3:]:
         ob = find_ob(zone_df, "bear", idx)
         if ob:
             supply_zones.append(ob)
-    # Order block dari swing low (demand)
     for idx in sl_z[-3:]:
         ob = find_ob(zone_df, "bull", idx)
         if ob:
             demand_zones.append(ob)
-    # FVG tambahan
     fvg = find_fvg(zone_df)
     if fvg:
         if fvg["type"] == "bearish":
@@ -285,44 +262,52 @@ def generate_dual_signals(symbol):
         elif fvg["type"] == "bullish":
             demand_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
 
-    # --- 3. HARGA TERKINI DARI M15 / M5 ---
     entry_df = dfs.get("15m")
     if entry_df is None or not isinstance(entry_df, pd.DataFrame) or entry_df.empty:
         entry_df = dfs.get("5m")
-    price = entry_df["Close"].iloc[-1] if (entry_df is not None and not entry_df.empty) else 2650
+    if entry_df is not None and not entry_df.empty:
+        price = entry_df["Close"].iloc[-1]
+        atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
+        if pd.isna(atr) or atr <= 0:
+            atr = price * 0.002
+    else:
+        price = 2650
+        atr = 10
 
-    # --- 4. PILIH ZONA TERDEKAT ---
+    # Zona terdekat dalam jarak 2x ATR
     best_supply = None
     for zone in supply_zones:
-        if zone["high"] > price:
+        if zone["high"] > price and (zone["high"] - price) < 2 * atr:
             if best_supply is None or zone["high"] < best_supply["high"]:
                 best_supply = zone
     best_demand = None
     for zone in demand_zones:
-        if zone["low"] < price:
+        if zone["low"] < price and (price - zone["low"]) < 2 * atr:
             if best_demand is None or zone["low"] > best_demand["low"]:
                 best_demand = zone
 
-    # --- 5. HITUNG SINYAL SELL & BUY ---
     def calc_signal(direction, zone, price):
         if direction == "SELL":
-            entry = zone["high"] + 0.01
-            sl = zone["low"] - 0.01
-            sl_distance = abs(entry - sl)
-            if symbol == "XAUUSD":
-                sl_distance = min(sl_distance, 10.0)
-            tp1 = entry - sl_distance * 1.0
-            tp2 = entry - sl_distance * 2.0
-            tp3 = entry - sl_distance * 3.0
-        else:
-            entry = zone["low"] - 0.01
-            sl = zone["high"] + 0.01
-            sl_distance = abs(entry - sl)
-            if symbol == "XAUUSD":
-                sl_distance = min(sl_distance, 10.0)
-            tp1 = entry + sl_distance * 1.0
-            tp2 = entry + sl_distance * 2.0
-            tp3 = entry + sl_distance * 3.0
+            entry = zone["high"]
+            sl = zone["low"]
+            distance = entry - sl
+            # Batasi SL maksimum 100 pip (1.0) untuk XAUUSD
+            if symbol == "XAUUSD" and distance > 1.0:
+                sl = entry - 1.0
+                distance = 1.0
+            tp1 = entry - distance
+            tp2 = entry - distance * 2
+            tp3 = entry - distance * 3
+        else:  # BUY
+            entry = zone["low"]
+            sl = zone["high"]
+            distance = sl - entry
+            if symbol == "XAUUSD" and distance > 1.0:
+                sl = entry + 1.0
+                distance = 1.0
+            tp1 = entry + distance
+            tp2 = entry + distance * 2
+            tp3 = entry + distance * 3
         return entry, sl, tp1, tp2, tp3
 
     sell_signal = None
@@ -337,10 +322,9 @@ def generate_dual_signals(symbol):
             "tp3": tp3,
             "zone_high": best_supply["high"],
             "zone_low": best_supply["low"],
-            "reason": f"Supply zone dari order block bearish di {best_supply['high']:.2f}-{best_supply['low']:.2f}. Konfirmasi: struktur lower high.",
+            "reason": f"Supply zone dari order block bearish di {best_supply['high']:.2f}-{best_supply['low']:.2f}. Konfirmasi: struktur lower high, potensi distribusi.",
             "status": "pending"
         }
-
     buy_signal = None
     if best_demand:
         entry, sl, tp1, tp2, tp3 = calc_signal("BUY", best_demand, price)
@@ -353,10 +337,9 @@ def generate_dual_signals(symbol):
             "tp3": tp3,
             "zone_high": best_demand["high"],
             "zone_low": best_demand["low"],
-            "reason": f"Demand zone dari order block bullish di {best_demand['high']:.2f}-{best_demand['low']:.2f}. Konfirmasi: akumulasi.",
+            "reason": f"Demand zone dari order block bullish di {best_demand['high']:.2f}-{best_demand['low']:.2f}. Konfirmasi: akumulasi, pantulan valid.",
             "status": "pending"
         }
-
     return sell_signal, buy_signal, bias
 
 # ==================== SESSION STATE ====================
@@ -490,7 +473,6 @@ else:
         setInterval(updateClock, 1000);
         </script>
         """, height=60)
-
         st.markdown(f"<p style='color:#888;'>{datetime.now().strftime('%A, %d %B %Y')}</p>", unsafe_allow_html=True)
         conn = get_conn()
         c = conn.cursor()
@@ -520,10 +502,10 @@ else:
     pair = st.selectbox("Pair", pairs, index=pairs.index(st.session_state.pair) if st.session_state.pair in pairs else 0)
     st.session_state.pair = pair
 
-    # --- AMBIL SINYAL ---
+    # Sinyal
     sell_sig, buy_sig, bias = generate_dual_signals(pair)
 
-    # --- DETEKSI TOUCH (harga real-time dari Yahoo 1m) ---
+    # Deteksi running
     @st.cache_data(ttl=60)
     def get_live_price(symbol):
         ticker = SYMBOL_MAP.get(symbol, "GC=F")
@@ -542,7 +524,16 @@ else:
         if buy_sig and not st.session_state.buy_touched and live_price <= buy_sig["entry"]:
             st.session_state.buy_touched = True
 
-    # --- TAMPILKAN SINYAL ---
+    # Chart TradingView di atas
+    tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
+    tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
+    <script src="https://s3.tradingview.com/tv.js"></script>
+    <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"container_id":"tv"}});</script></div>"""
+    components.html(tv, height=520)
+
+    st.markdown("---")
+    st.subheader("🎯 Sinyal Dual Limit Order (Zone Supply & Demand)")
+
     col1, col2 = st.columns(2)
     with col1:
         if sell_sig:
@@ -578,18 +569,17 @@ else:
         else:
             st.info("Tidak ada demand zone valid di bawah harga.")
 
-    # Chart TradingView
-    tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
-    tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
-    <script src="https://s3.tradingview.com/tv.js"></script>
-    <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"container_id":"tv"}});</script></div>"""
-    components.html(tv, height=520)
+    # Running status
+    if st.session_state.sell_touched or st.session_state.buy_touched:
+        st.warning("⚡ Ada sinyal yang sedang **RUNNING**. Pantau pergerakan harga.")
 
+    # Tombol reset
     if st.button("🔄 Reset Status Running"):
         st.session_state.sell_touched = False
         st.session_state.buy_touched = False
         st.rerun()
 
+    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align:center; color:#888; padding:10px;'>
