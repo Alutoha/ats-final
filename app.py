@@ -10,9 +10,8 @@ import pytz
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from collections import Counter
 
-# ==================== PASSWORD HASHING ====================
+# ==================== AUTHENTICATION ====================
 def hash_password(password):
     salt = os.urandom(32)
     key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
@@ -24,7 +23,6 @@ def check_password(password, hashed):
     new_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
     return new_key == key
 
-# ==================== DATABASE SETUP ====================
 def init_db():
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
@@ -136,7 +134,7 @@ def extend_user(uid, days):
         conn.commit()
     conn.close()
 
-# ==================== SYMBOL & UTILITY ====================
+# ==================== SYMBOL & DATA ====================
 SYMBOL_MAP = {"XAUUSD": "GC=F"}
 TV_SYMBOL = {"XAUUSD": "OANDA:XAUUSD"}
 
@@ -174,9 +172,14 @@ def fetch_all_timeframes(symbol):
     df = fetch_data(symbol, "1m", "7d")
     if df is not None and not df.empty:
         result["1m"] = df
+        df_3m = df.resample('3T').agg({
+            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+        }).dropna()
+        if not df_3m.empty:
+            result["3m"] = df_3m
     return result
 
-# ==================== TEKNIKAL FUNCTIONS ====================
+# ==================== TEKNIKAL ====================
 def find_swings(df, strength=2):
     highs = df["High"].values
     lows = df["Low"].values
@@ -238,14 +241,14 @@ def detect_cisd(df):
 # ==================== VOLUME, ADX, POC ====================
 def check_volume_strength(df, lookback=20, multiplier=1.5):
     if "Volume" not in df.columns or df["Volume"].sum() == 0:
-        return "N/A", "Volume data unavailable"
+        return "N/A", "N/A"
     if len(df) < lookback:
         avg_vol = df["Volume"].mean()
     else:
         avg_vol = df["Volume"].iloc[-lookback:-1].mean()
     last_vol = df["Volume"].iloc[-1]
     if avg_vol == 0:
-        return "N/A", "Volume zero"
+        return "N/A", "N/A"
     ratio = last_vol / avg_vol
     if ratio >= multiplier:
         return "STRONG", f"{ratio:.1f}x avg"
@@ -256,7 +259,7 @@ def check_volume_strength(df, lookback=20, multiplier=1.5):
 
 def calculate_adx(df, period=14):
     if len(df) < period + 1:
-        return 0, "Data tidak cukup"
+        return 0, "N/A"
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
@@ -272,19 +275,19 @@ def calculate_adx(df, period=14):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = dx.rolling(period).mean().iloc[-1]
     if pd.isna(adx):
-        return 0, "ADX tidak valid"
+        return 0, "N/A"
     status = "TREN KUAT" if adx > 25 else ("RANGING" if adx < 20 else "TREN MODERAT")
     return round(adx, 2), status
 
 def find_poc(df, lookback=50):
     if "Volume" not in df.columns or len(df) < lookback:
-        return None, "Volume data tidak cukup"
+        return None, None
     df_slice = df.iloc[-lookback:]
     max_vol_idx = df_slice["Volume"].idxmax()
     if max_vol_idx in df_slice.index:
         poc_price = df_slice.loc[max_vol_idx, "Close"]
         return round(poc_price, 2), f"PoC di {poc_price:.2f}"
-    return None, "PoC tidak ditemukan"
+    return None, None
 
 # ==================== FILTER LANJUTAN ====================
 def detect_inducement(df, zone_high, zone_low, direction):
@@ -330,9 +333,9 @@ def detect_bos_bpr(df):
     sh, sl = find_swings(df.iloc[-15:], strength=2)
     last_close = df["Close"].iloc[-1]
     if len(sh) >= 1 and last_close > df["High"].iloc[sh[-1]]:
-        return True, "✅ BOS Bullish (breakout atas)"
+        return True, "✅ BOS Bullish"
     if len(sl) >= 1 and last_close < df["Low"].iloc[sl[-1]]:
-        return True, "✅ BOS Bearish (breakout bawah)"
+        return True, "✅ BOS Bearish"
     range_high = df["High"].iloc[-5:].max()
     range_low = df["Low"].iloc[-5:].min()
     if last_close > range_high:
@@ -340,21 +343,6 @@ def detect_bos_bpr(df):
     if last_close < range_low:
         return True, "✅ BPR Bearish"
     return False, "Belum ada BOS/BPR"
-
-def get_session_levels(df):
-    if df is None or df.empty or len(df) < 24:
-        return None, None, None, None, None, None
-    df_24h = df.iloc[-24:] if len(df) >= 24 else df
-    n = len(df_24h)
-    asia_df = df_24h.iloc[:n//3] if n >= 3 else df_24h
-    london_df = df_24h.iloc[n//3:2*n//3] if n >= 6 else df_24h
-    ny_df = df_24h.iloc[2*n//3:] if n >= 9 else df_24h
-    return (asia_df["High"].max() if not asia_df.empty else None,
-            asia_df["Low"].min() if not asia_df.empty else None,
-            london_df["High"].max() if not london_df.empty else None,
-            london_df["Low"].min() if not london_df.empty else None,
-            ny_df["High"].max() if not ny_df.empty else None,
-            ny_df["Low"].min() if not ny_df.empty else None)
 
 # ==================== PIVOT, EQH/EQL, PREMIUM, PATTERN, QM ====================
 def calculate_pivots(daily_df):
@@ -370,8 +358,7 @@ def detect_eqh_eql(df, strength=2, tolerance=0.5):
     sh_idx, sl_idx = find_swings(df, strength)
     swing_highs = [float(df["High"].iloc[i]) for i in sh_idx]
     swing_lows = [float(df["Low"].iloc[i]) for i in sl_idx]
-    eqh = []
-    eql = []
+    eqh, eql = [], []
     for i in range(len(swing_highs)):
         for j in range(i+1, len(swing_highs)):
             if abs(swing_highs[i] - swing_highs[j]) <= tolerance:
@@ -466,7 +453,7 @@ def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premiu
     return desc
 
 # ==================== SIGNAL GENERATOR ====================
-def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
+def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
         return None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data tidak lengkap."
@@ -491,13 +478,18 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     range_high = float(daily_df["High"].iloc[-5:].max())
     range_low = float(daily_df["Low"].iloc[-5:].min())
 
-    # ========== Tentukan Timeframe & Multiplier Dasar ==========
-    if mode == "Scalping":
+    # ========== Tentukan Timeframe ==========
+    if mode == "M3":
+        zone_tf = "3m"
+        entry_tf = "1m"
+        base_sl_mult = 0.5
+        max_dist = 3.0
+    elif mode == "M5":
         zone_tf = "5m"
         entry_tf = "5m"
-        base_sl_mult = 0.6   # akan disesuaikan dengan batas poin
+        base_sl_mult = 0.6
         max_dist = 3.0
-    else:
+    else:  # Intraday
         zone_tf = "1h"
         entry_tf = "15m"
         base_sl_mult = 1.5
@@ -517,7 +509,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     if pd.isna(atr) or atr <= 0:
         atr = price * 0.001
 
-    # ========== VOLATILITY LEVEL ==========
+    # ========== Volatilitas ==========
     if atr < 8:
         vol_label = "RENDAH"
     elif atr < 15:
@@ -527,22 +519,14 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     else:
         vol_label = "SANGAT TINGGI"
 
-    # ========== TENTUKAN SL MULTIPLIER & BATAS POIN UNTUK SCALPING ==========
-    if mode == "Scalping":
-        # Tentukan batas maksimal SL dalam poin berdasarkan vol_label
-        if vol_label == "SANGAT TINGGI":
-            max_sl_points = 15.0
-        elif vol_label == "TINGGI":
-            max_sl_points = 10.0
-        else:  # SEDANG atau RENDAH
-            max_sl_points = 8.0
-        
-        # Hitung SL dasar = atr * base_sl_mult, lalu batasi
+    # ========== Batas SL untuk Scalping ==========
+    if mode in ["M3", "M5"]:
+        if mode == "M3":
+            max_sl_points = 12.0 if vol_label == "SANGAT TINGGI" else (8.0 if vol_label == "TINGGI" else 6.0)
+        else:  # M5
+            max_sl_points = 15.0 if vol_label == "SANGAT TINGGI" else (10.0 if vol_label == "TINGGI" else 8.0)
         sl_calc = atr * base_sl_mult
-        if sl_calc > max_sl_points:
-            sl_mult = max_sl_points / atr  # sesuaikan multiplier agar SL ≤ batas
-        else:
-            sl_mult = base_sl_mult
+        sl_mult = max_sl_points / atr if sl_calc > max_sl_points else base_sl_mult
     else:
         sl_mult = base_sl_mult
 
@@ -585,18 +569,16 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
                 best_demand = z
 
     # ========== VOLUME, ADX, POC ==========
-    vol_status, vol_detail = check_volume_strength(entry_df, lookback=20, multiplier=1.5)
-    adx_val, adx_status = calculate_adx(entry_df, period=14)
-    poc_price, poc_detail = find_poc(entry_df, lookback=50)
+    vol_status, vol_detail = check_volume_strength(entry_df)
+    adx_val, adx_status = calculate_adx(entry_df)
+    poc_price, poc_detail = find_poc(entry_df)
     poc_confluence = False
-    if poc_price and best_supply:
-        if best_supply["low"] <= poc_price <= best_supply["high"]:
-            poc_confluence = True
-    if poc_price and best_demand:
-        if best_demand["low"] <= poc_price <= best_demand["high"]:
+    if poc_price:
+        if (best_supply and best_supply["low"] <= poc_price <= best_supply["high"]) or \
+           (best_demand and best_demand["low"] <= poc_price <= best_demand["high"]):
             poc_confluence = True
 
-    # ========== FILTERS ==========
+    # ========== FILTER FUNCTIONS ==========
     def check_rejection_candle(df, zone_high, zone_low, direction):
         if len(df) < 2:
             return False, "Data candle tidak cukup"
@@ -620,9 +602,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
             return True, "Data tidak cukup"
         avg_range = (df["High"].iloc[-6:-1] - df["Low"].iloc[-6:-1]).mean()
         last_range = df["High"].iloc[-1] - df["Low"].iloc[-1]
-        if last_range > 1.5 * avg_range:
-            return False, "🔥 Momentum tinggi"
-        return True, "✅ Slowdown"
+        return (last_range <= 1.5 * avg_range), "✅ Slowdown" if last_range <= 1.5 * avg_range else "🔥 Momentum tinggi"
 
     def check_bias_confluence(direction, daily_bias, cisd):
         if daily_bias == "NEUTRAL":
@@ -642,10 +622,10 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         else:
             return round(zone["high"] - (zone_width * 0.382), 2)
 
-    def run_all_filters(zone, direction, entry_df, daily_bias, cisd):
+    def run_all_filters(zone, direction):
         wick_ok, wick_msg = check_rejection_candle(entry_df, zone["high"], zone["low"], direction)
         speed_ok, speed_msg = check_approach_speed(entry_df)
-        bias_ok, bias_msg = check_bias_confluence(direction, daily_bias, cisd)
+        bias_ok, bias_msg = check_bias_confluence(direction, bias, cisd)
         induce_ok, induce_msg = detect_inducement(entry_df, zone["high"], zone["low"], direction)
         breaker_ok, breaker_msg = detect_breaker_block(entry_df, zone["high"], zone["low"], direction)
         choch_type, choch_msg = detect_choch(entry_df)
@@ -666,22 +646,28 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         if choch_type: status += f" | {choch_msg}"
         if bos_ok: status += f" | {bos_msg}"
 
-        extra_msgs = []
-        extra_msgs.append(f"📊 VOL: {vol_status} ({vol_detail})")
-        extra_msgs.append(f"📈 ADX: {adx_val} ({adx_status})")
-        extra_msgs.append(f"⚡ Volatilitas: {vol_label} (ATR={atr:.2f})")
-        if mode == "Scalping":
-            extra_msgs.append(f"🛡️ SL Multiplier: {sl_mult:.2f} → SL ~ {atr*sl_mult:.2f} poin (max {max_sl_points if vol_label in ['SANGAT TINGGI','TINGGI'] else 8.0})")
+        extra_msgs = [
+            f"📊 VOL: {vol_status} ({vol_detail})",
+            f"📈 ADX: {adx_val} ({adx_status})",
+            f"⚡ Volatilitas: {vol_label} (ATR={atr:.2f})",
+        ]
+        if mode in ["M3", "M5"]:
+            extra_msgs.append(f"🛡️ SL ~ {atr*sl_mult:.2f} poin (max {max_sl_points})")
         if poc_price: extra_msgs.append(f"🎯 PoC: {poc_price}")
         if poc_confluence: extra_msgs.append("🔥 PoC CONFLUENCE!")
 
         return status, risk, [wick_msg, speed_msg, bias_msg, induce_msg, breaker_msg] + extra_msgs
 
     def build_order(order_type, direction, entry, sl, tp1, tp2, tp3, reason, zone_info="", validation_status="", risk_label="SAFE", filter_msgs=None):
-        return {"type": order_type, "direction": direction, "entry": round(entry, 2), "sl": round(sl, 2),
-                "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2),
-                "reason": reason, "zone_info": zone_info, "validation_status": validation_status,
-                "risk_label": risk_label, "filter_msgs": filter_msgs if filter_msgs else []}
+        return {
+            "type": order_type, "direction": direction,
+            "entry": round(entry, 2), "sl": round(sl, 2),
+            "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2),
+            "reason": reason, "zone_info": zone_info,
+            "validation_status": validation_status,
+            "risk_label": risk_label,
+            "filter_msgs": filter_msgs if filter_msgs else []
+        }
 
     def calc_tp_rr(entry, sl, direction):
         risk = abs(entry - sl)
@@ -691,49 +677,98 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         else:
             return round(entry - risk*1.2, 2), round(entry - risk*2.0, 2), round(entry - risk*4.0, 2)
 
-    orders = {"buy_limit": None, "sell_limit": None, "buy_stop": None, "sell_stop": None}
+    orders = {"sell": None, "buy": None}
+    best_direction = None
 
-    if best_supply:
-        entry = mitigate_entry(best_supply, "SELL")
-        sl = best_supply["high"] + (atr * sl_mult)
-        tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
-        val_status, risk_label, filter_msgs = run_all_filters(best_supply, "SELL", entry_df, bias, cisd)
-        orders["sell_limit"] = build_order("LIMIT", "SELL", entry, sl, tp1, tp2, tp3,
-            f"Sell Limit di Supply OB {best_supply['low']:.2f}-{best_supply['high']:.2f}",
-            f"OB: {best_supply['low']:.2f}-{best_supply['high']:.2f}", val_status, risk_label, filter_msgs)
+    # === KONSERVATIF (LIMIT) ===
+    if exec_mode == "Konservatif":
+        if best_supply:
+            entry = mitigate_entry(best_supply, "SELL")
+            sl = best_supply["high"] + (atr * sl_mult)
+            tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
+            val_status, risk_label, filter_msgs = run_all_filters(best_supply, "SELL")
+            orders["sell"] = build_order("LIMIT", "SELL", entry, sl, tp1, tp2, tp3,
+                f"Sell Limit di Supply OB {best_supply['low']:.2f}-{best_supply['high']:.2f}",
+                f"OB: {best_supply['low']:.2f}-{best_supply['high']:.2f}",
+                val_status, risk_label, filter_msgs)
+        if best_demand:
+            entry = mitigate_entry(best_demand, "BUY")
+            sl = best_demand["low"] - (atr * sl_mult)
+            tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
+            val_status, risk_label, filter_msgs = run_all_filters(best_demand, "BUY")
+            orders["buy"] = build_order("LIMIT", "BUY", entry, sl, tp1, tp2, tp3,
+                f"Buy Limit di Demand OB {best_demand['low']:.2f}-{best_demand['high']:.2f}",
+                f"OB: {best_demand['low']:.2f}-{best_demand['high']:.2f}",
+                val_status, risk_label, filter_msgs)
 
-    if best_demand:
-        entry = mitigate_entry(best_demand, "BUY")
-        sl = best_demand["low"] - (atr * sl_mult)
-        tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
-        val_status, risk_label, filter_msgs = run_all_filters(best_demand, "BUY", entry_df, bias, cisd)
-        orders["buy_limit"] = build_order("LIMIT", "BUY", entry, sl, tp1, tp2, tp3,
-            f"Buy Limit di Demand OB {best_demand['low']:.2f}-{best_demand['high']:.2f}",
-            f"OB: {best_demand['low']:.2f}-{best_demand['high']:.2f}", val_status, risk_label, filter_msgs)
+    # === AGRESIF (MARKET NOW) ===
+    else:
+        sell_score, buy_score = 50, 50
+        if bias == "SELL": sell_score += 20
+        elif bias == "BUY": buy_score += 20
+        if cisd == "BEARISH_CISD": sell_score += 15
+        elif cisd == "BULLISH_CISD": buy_score += 15
+        if best_supply: sell_score += 15
+        if best_demand: buy_score += 15
+        if nearest_lows and (price - nearest_lows[0]) < atr * 2: sell_score += 10
+        if nearest_highs and (nearest_highs[0] - price) < atr * 2: buy_score += 10
 
-    if nearest_lows:
-        entry = nearest_lows[0] - (atr * 0.5)
-        sl = nearest_lows[0] + (atr * 1.0)
-        tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
-        orders["sell_stop"] = build_order("STOP", "SELL", entry, sl, tp1, tp2, tp3,
-            f"Sell Stop di bawah Swing Low {nearest_lows[0]:.2f}", "", "🔥 STOP ORDER", "HIGH RISK",
-            [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})", f"⚡ Volatilitas: {vol_label}"])
+        total = sell_score + buy_score
+        if total == 0:
+            sell_pct, buy_pct = 50, 50
+        else:
+            sell_pct = round((sell_score / total) * 100)
+            buy_pct = 100 - sell_pct
 
-    if nearest_highs:
-        entry = nearest_highs[0] + (atr * 0.5)
-        sl = nearest_highs[0] - (atr * 1.0)
-        tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
-        orders["buy_stop"] = build_order("STOP", "BUY", entry, sl, tp1, tp2, tp3,
-            f"Buy Stop di atas Swing High {nearest_highs[0]:.2f}", "", "🔥 STOP ORDER", "HIGH RISK",
-            [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})", f"⚡ Volatilitas: {vol_label}"])
+        if sell_pct >= 60:
+            best_direction = "SELL"
+        elif buy_pct >= 60:
+            best_direction = "BUY"
+        else:
+            best_direction = None
 
+        if best_direction == "SELL":
+            entry = price
+            sl = price + (atr * 0.6)
+            tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
+            val_status = "🚀 AGRESIF (Market SELL)"
+            risk_label = "HIGH RISK"
+            filter_msgs = [
+                f"📊 VOL: {vol_status} ({vol_detail})",
+                f"📈 ADX: {adx_val} ({adx_status})",
+                f"⚡ Volatilitas: {vol_label}",
+                f"📉 Konfidence SELL: {sell_pct}%",
+                f"🎯 Entry di harga spot: {price}"
+            ]
+            orders["sell"] = build_order("MARKET", "SELL", entry, sl, tp1, tp2, tp3,
+                f"Sell Now (Market) di {price}",
+                f"Spot: {price}", val_status, risk_label, filter_msgs)
+
+        elif best_direction == "BUY":
+            entry = price
+            sl = price - (atr * 0.6)
+            tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
+            val_status = "🚀 AGRESIF (Market BUY)"
+            risk_label = "HIGH RISK"
+            filter_msgs = [
+                f"📊 VOL: {vol_status} ({vol_detail})",
+                f"📈 ADX: {adx_val} ({adx_status})",
+                f"⚡ Volatilitas: {vol_label}",
+                f"📈 Konfidence BUY: {buy_pct}%",
+                f"🎯 Entry di harga spot: {price}"
+            ]
+            orders["buy"] = build_order("MARKET", "BUY", entry, sl, tp1, tp2, tp3,
+                f"Buy Now (Market) di {price}",
+                f"Spot: {price}", val_status, risk_label, filter_msgs)
+
+    # === Confidence & Confluence ===
     sell_score, buy_score = 50, 50
     if bias == "SELL": sell_score += 20
     elif bias == "BUY": buy_score += 20
     if cisd == "BEARISH_CISD": sell_score += 15
     elif cisd == "BULLISH_CISD": buy_score += 15
-    if orders["sell_limit"] is not None: sell_score += 15
-    if orders["buy_limit"] is not None: buy_score += 15
+    if best_supply is not None: sell_score += 15
+    if best_demand is not None: buy_score += 15
     if nearest_lows and (price - nearest_lows[0]) < atr * 2: sell_score += 10
     if nearest_highs and (nearest_highs[0] - price) < atr * 2: buy_score += 10
 
@@ -746,26 +781,40 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     else: rec_direction = "NEUTRAL"; rec_label = "WAIT & SEE"
     confidence = {"sell": sell_pct, "buy": buy_pct, "direction": rec_direction, "label": rec_label}
 
+    # === Buat Confluence Description ===
+    diff = abs(sell_pct - buy_pct)
+    if diff > 20:
+        if sell_pct > buy_pct:
+            confluence_desc = "SELLER STRONG, BUYER WEAK"
+        else:
+            confluence_desc = "BUYER STRONG, SELLER WEAK"
+    else:
+        confluence_desc = "SIDEWAYS / NEUTRAL (gunakan momentum)"
+    confluence = {"sell": sell_pct, "buy": buy_pct, "desc": confluence_desc}
+
     return (
         orders, bsl, ssl, bias, nearest_highs, nearest_lows, confidence,
         pivot_data, eqh, eql, premium_status, patterns, qm_levels,
-        equilibrium, premium_pct
+        equilibrium, premium_pct, confluence
     )
 
-# ==================== SESSION STATE & UI ====================
+# ==================== SESSION STATE ====================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.role = None
     st.session_state.nama = None
-    st.session_state.mode = "Intraday"
+    st.session_state.mode = "M5"
+    st.session_state.exec_mode = "Konservatif"
     st.session_state.triggered_orders = []
     st.session_state.trigger_counter = 0
     st.session_state.saved_user = ""
     st.session_state.saved_pass = ""
+    st.session_state.refresh_agresif = 0
 
 st.set_page_config(page_title="XAUUSD - Alu System", page_icon="🥇", layout="wide")
 init_db()
 
+# ==================== CSS ====================
 st.markdown("""
 <style>
     .stApp { background: #0E1117; }
@@ -807,6 +856,11 @@ st.markdown("""
     .badge-induce { background: #ff880022; border: 1px solid #ff8800; color: #ff8800; padding: 2px 12px; border-radius: 30px; font-size: 0.65rem; }
     .badge-breaker { background: #8800ff22; border: 1px solid #8800ff; color: #8800ff; padding: 2px 12px; border-radius: 30px; font-size: 0.65rem; }
     .badge-poc { background: #00ffcc22; border: 1px solid #00ffcc; color: #00ffcc; padding: 2px 12px; border-radius: 30px; font-size: 0.65rem; }
+    .confluence-badge { background: #222; border-radius: 30px; padding: 4px 16px; font-weight: bold; display: inline-block; }
+    .confluence-strong-sell { background: #ff444422; border: 1px solid #ff4444; color: #ff4444; }
+    .confluence-strong-buy { background: #00ff8822; border: 1px solid #00ff88; color: #00ff88; }
+    .confluence-neutral { background: #ffaa0022; border: 1px solid #ffaa00; color: #ffaa00; }
+    .refresh-btn { background: #ffaa00; color: #000; border: none; border-radius: 30px; padding: 8px 20px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -815,7 +869,7 @@ if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.markdown("<br><br><h1 style='text-align:center;color:#FFD700;'>🥇 XAUUSD SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>SL Scalping Dibatasi Berdasarkan Volatilitas</p><br>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>Konservatif (Limit) atau Agresif (Market)</p><br>", unsafe_allow_html=True)
         role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
         u = st.text_input("Username", value=st.session_state.saved_user)
         p = st.text_input("Password", type="password", value=st.session_state.saved_pass)
@@ -921,6 +975,8 @@ else:
             sisa = (exp - datetime.now()).days
             st.info(f"🎁 Trial {sisa} hari" if row[1] else f"⏳ {sisa} hari")
         st.markdown("---")
+        if st.button("🔄 Refresh Signal", use_container_width=True, key="refresh_sidebar"):
+            st.rerun()
         if st.button("🚪 LOGOUT", use_container_width=True):
             st.session_state.logged_in = False
             st.rerun()
@@ -941,12 +997,43 @@ else:
     else:
         ohlc = {"Open": 0, "High": 0, "Low": 0, "Close": 0}; bias = "NEUTRAL"; bias_color = "bias-neutral"
 
+    # --- MODE & EKSEKUSI ---
+    col_mode1, col_mode2, col_mode3, col_mode4 = st.columns([1,1,1,1])
+    with col_mode1:
+        if st.button("⚡ M5", use_container_width=True, type="primary" if st.session_state.mode == "M5" else "secondary"):
+            st.session_state.mode = "M5"; st.session_state.triggered_orders = []; st.rerun()
+    with col_mode2:
+        if st.button("⚡ M3", use_container_width=True, type="primary" if st.session_state.mode == "M3" else "secondary"):
+            st.session_state.mode = "M3"; st.session_state.triggered_orders = []; st.rerun()
+    with col_mode3:
+        if st.button("📈 INTRADAY", use_container_width=True, type="primary" if st.session_state.mode == "Intraday" else "secondary"):
+            st.session_state.mode = "Intraday"; st.session_state.triggered_orders = []; st.rerun()
+    with col_mode4:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+
+    st.markdown("---")
+    # Mode Eksekusi (hanya untuk scalping M5/M3, untuk intraday otomatis Konservatif)
+    if st.session_state.mode in ["M5", "M3"]:
+        exec_opts = ["🎯 Konservatif (Limit di Zona)", "🚀 Agresif (Market Now)"]
+        idx = 0 if st.session_state.exec_mode == "Konservatif" else 1
+        selected = st.radio("Mode Eksekusi", exec_opts, index=idx, horizontal=True)
+        if selected.startswith("🎯"):
+            st.session_state.exec_mode = "Konservatif"
+        else:
+            st.session_state.exec_mode = "Agresif"
+    else:
+        st.session_state.exec_mode = "Konservatif"
+        st.info("📊 Intraday menggunakan Konservatif (Limit Order)")
+
+    st.markdown("---")
+
     # --- GENERATE SIGNAL ---
     (
         orders, bsl, ssl, bias, near_highs, near_lows, conf,
         pivot_data, eqh, eql, premium_status, patterns, qm_levels,
-        equilibrium, premium_pct
-    ) = generate_all_signals("XAUUSD", mode=st.session_state.mode)
+        equilibrium, premium_pct, confluence
+    ) = generate_all_signals("XAUUSD", mode=st.session_state.mode, exec_mode=st.session_state.exec_mode)
 
     # Harga spot
     try:
@@ -955,11 +1042,13 @@ else:
     except:
         spot = ohlc["Close"]
 
-    # --- HEADER + OHLC ---
+    # --- HEADER ---
     col_h1, col_h2 = st.columns([2, 1])
     with col_h1:
         st.markdown("<h1 class='header-title'>🥇 XAUUSD</h1>", unsafe_allow_html=True)
         st.markdown(f"<span>Daily Bias: <span class='bias-badge {bias_color}'>{bias}</span></span>", unsafe_allow_html=True)
+        if st.session_state.exec_mode == "Agresif" and st.session_state.mode in ["M5", "M3"]:
+            st.caption(f"🔄 Sinyal Agresif terakhir di-refresh: {datetime.now().strftime('%H:%M:%S')}")
     with col_h2:
         st.markdown(f"""
         <div style='display:flex; flex-wrap:wrap; gap:5px; justify-content:flex-end;'>
@@ -968,6 +1057,31 @@ else:
             <div class='ohlc-box'><span class='ohlc-label'>Low</span><br><span class='ohlc-value' style='color:#ff4444;'>{ohlc['Low']}</span></div>
             <div class='ohlc-box'><span class='ohlc-label'>Close</span><br><span class='ohlc-value'>{ohlc['Close']}</span></div>
         </div>""", unsafe_allow_html=True)
+
+    # --- CONFLUENCE SIGNAL ---
+    if confluence:
+        sell_pct = confluence['sell']
+        buy_pct = confluence['buy']
+        desc = confluence['desc']
+        if "SELLER STRONG" in desc:
+            badge_class = "confluence-strong-sell"
+            icon = "🔴"
+        elif "BUYER STRONG" in desc:
+            badge_class = "confluence-strong-buy"
+            icon = "🟢"
+        else:
+            badge_class = "confluence-neutral"
+            icon = "⏳"
+        st.markdown(f"""
+        <div style='display:flex; justify-content:center; gap:20px; margin:10px 0; flex-wrap:wrap;'>
+            <span style='color:#ff4444;'>SELL {sell_pct}%</span>
+            <span style='color:#888;'>|</span>
+            <span style='color:#00ff88;'>BUY {buy_pct}%</span>
+            <span class='confluence-badge {badge_class}'>{icon} {desc}</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("---")
 
     # --- TEKNIKAL GRID ---
     pivot, r1, r2, r3, s1, s2, s3 = pivot_data if pivot_data else (0,0,0,0,0,0,0)
@@ -1017,17 +1131,8 @@ else:
 
     st.markdown("---")
 
-    # --- MODE BUTTONS ---
-    c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 3])
-    with c_btn1:
-        if st.button("⚡ SCALPING", use_container_width=True, type="primary" if st.session_state.mode == "Scalping" else "secondary"):
-            st.session_state.mode = "Scalping"; st.session_state.triggered_orders = []; st.rerun()
-    with c_btn2:
-        if st.button("📈 INTRADAY", use_container_width=True, type="primary" if st.session_state.mode == "Intraday" else "secondary"):
-            st.session_state.mode = "Intraday"; st.session_state.triggered_orders = []; st.rerun()
-
     # --- CHART ---
-    tv_interval = "5" if st.session_state.mode == "Scalping" else "15"
+    tv_interval = "5" if st.session_state.mode in ["M5","M3"] else "15"
     tv_html = f"""
     <div class="tradingview-widget-container" style="height:500px; margin-top:10px; border-radius:15px; overflow:hidden; border:1px solid #2a3240;">
         <div id="tv_chart"></div>
@@ -1037,9 +1142,9 @@ else:
     components.html(tv_html, height=520)
 
     st.markdown("---")
-    st.markdown("### 📊 4 Jenis Order + SL Scalping Dibatasi Berdasarkan Volatilitas")
+    st.markdown("### 📊 Sinyal Eksekusi")
 
-    # --- TRIGGER LOGIC ---
+    # --- TRIGGER LOGIK (hanya untuk Konservatif / Limit) ---
     live_price = None
     try:
         df_live = yf.download("GC=F", period="1d", interval="1m")
@@ -1047,35 +1152,37 @@ else:
             live_price = float(df_live["Close"].iloc[-1])
     except: pass
 
-    if live_price is not None:
+    # Untuk Limit (Konservatif) kita jalankan trigger seperti biasa
+    if st.session_state.exec_mode == "Konservatif" and live_price is not None:
         to_remove = []
         for o in st.session_state.triggered_orders:
             if o["status"] != "running": continue
-            if o["direction"] == "BUY" and (live_price <= o["sl"] or live_price >= o["tp3"]): to_remove.append(o["id"])
-            if o["direction"] == "SELL" and (live_price >= o["sl"] or live_price <= o["tp3"]): to_remove.append(o["id"])
+            if o["direction"] == "BUY" and (live_price <= o["sl"] or live_price >= o["tp3"]):
+                to_remove.append(o["id"])
+            if o["direction"] == "SELL" and (live_price >= o["sl"] or live_price <= o["tp3"]):
+                to_remove.append(o["id"])
         st.session_state.triggered_orders = [o for o in st.session_state.triggered_orders if o["id"] not in to_remove]
 
-        for key, order in orders.items():
-            if order is None: continue
-            if any(o["entry"] == order["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders): continue
-            if order["direction"] == "SELL":
-                if order["type"] == "LIMIT" and live_price >= order["entry"]:
-                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"}); st.session_state.trigger_counter += 1
-                elif order["type"] == "STOP" and live_price <= order["entry"]:
-                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"}); st.session_state.trigger_counter += 1
-            elif order["direction"] == "BUY":
-                if order["type"] == "LIMIT" and live_price <= order["entry"]:
-                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"}); st.session_state.trigger_counter += 1
-                elif order["type"] == "STOP" and live_price >= order["entry"]:
-                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"}); st.session_state.trigger_counter += 1
+        # Trigger Limit
+        if orders.get("sell") and orders["sell"]["type"] == "LIMIT":
+            if live_price >= orders["sell"]["entry"]:
+                if not any(o["entry"] == orders["sell"]["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
+                    st.session_state.triggered_orders.append({**orders["sell"], "status": "running", "id": f"SELL_{st.session_state.trigger_counter}"})
+                    st.session_state.trigger_counter += 1
+        if orders.get("buy") and orders["buy"]["type"] == "LIMIT":
+            if live_price <= orders["buy"]["entry"]:
+                if not any(o["entry"] == orders["buy"]["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
+                    st.session_state.triggered_orders.append({**orders["buy"], "status": "running", "id": f"BUY_{st.session_state.trigger_counter}"})
+                    st.session_state.trigger_counter += 1
 
-    # --- RENDER ORDER CARDS ---
+    # --- RENDER ORDER CARD ---
     def render_order_card(order, key):
         if order is None: return ""
         dir_emoji = "🔴" if order["direction"] == "SELL" else "🟢"
         card_class = "sell-card" if order["direction"] == "SELL" else "buy-card"
         status = "Pending"
-        if any(o["entry"] == order["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders): status = "✅ RUNNING"
+        if any(o["entry"] == order["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
+            status = "✅ RUNNING"
         
         val_status = order.get("validation_status", "")
         badge_class = "badge-valid"
@@ -1118,63 +1225,81 @@ else:
         </div>
         """
 
+    # --- TAMPILAN 2 KOLOM (SELL / BUY) ---
     col_sell, col_buy = st.columns(2)
     with col_sell:
-        st.markdown("#### 🔻 SELL Orders")
-        st.markdown(render_order_card(orders["sell_limit"], "sell_limit"), unsafe_allow_html=True)
-        st.markdown(render_order_card(orders["sell_stop"], "sell_stop"), unsafe_allow_html=True)
+        st.markdown("#### 🔻 SELL Order")
+        if st.session_state.exec_mode == "Agresif" and st.session_state.mode in ["M5","M3"]:
+            if orders.get("sell"):
+                st.markdown(render_order_card(orders["sell"], "sell"), unsafe_allow_html=True)
+            elif orders.get("buy") is None:
+                st.info("📭 Tidak ada sinyal agresif yang valid (arah netral)")
+        else:
+            if orders.get("sell"):
+                st.markdown(render_order_card(orders["sell"], "sell"), unsafe_allow_html=True)
+            else:
+                st.info("📭 Tidak ada Supply Zone valid")
     with col_buy:
-        st.markdown("#### 🔺 BUY Orders")
-        st.markdown(render_order_card(orders["buy_limit"], "buy_limit"), unsafe_allow_html=True)
-        st.markdown(render_order_card(orders["buy_stop"], "buy_stop"), unsafe_allow_html=True)
+        st.markdown("#### 🔺 BUY Order")
+        if st.session_state.exec_mode == "Agresif" and st.session_state.mode in ["M5","M3"]:
+            if orders.get("buy"):
+                st.markdown(render_order_card(orders["buy"], "buy"), unsafe_allow_html=True)
+            elif orders.get("sell") is None:
+                st.info("📭 Tidak ada sinyal agresif yang valid (arah netral)")
+        else:
+            if orders.get("buy"):
+                st.markdown(render_order_card(orders["buy"], "buy"), unsafe_allow_html=True)
+            else:
+                st.info("📭 Tidak ada Demand Zone valid")
 
-    # --- RUNNING ORDERS ---
-    running = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
-    if running:
-        st.markdown("---")
-        st.markdown("### ⚡ Running Orders (Aktif)")
-        for o in running:
-            emoji = "🔴" if o["direction"] == "SELL" else "🟢"
-            border = "#ff4444" if o["direction"] == "SELL" else "#00ff88"
-            val_status = o.get("validation_status", "")
-            badge_class = "badge-valid"
-            if "INDUCEMENT" in val_status: badge_class = "badge-induce"
-            elif "BREAKER" in val_status: badge_class = "badge-breaker"
-            elif "FAKE" in val_status or "FAKE" in o.get("risk_label", ""): badge_class = "badge-fake"
-            elif "TOO FAST" in val_status: badge_class = "badge-toofast"
-            elif "NEEDS" in val_status or "NEED" in val_status: badge_class = "badge-wait"
-            risk_badge = ""
-            if "SAFE" in o.get("risk_label", ""): risk_badge = "<span class='risk-safe'>✅ SAFE</span>"
-            elif "HIGH RISK" in o.get("risk_label", ""): risk_badge = "<span class='risk-high'>⚠️ HIGH RISK</span>"
-            else: risk_badge = "<span class='risk-wait'>⏳ Need Confirmation</span>"
-            filter_msgs = o.get("filter_msgs", [])
-            filter_html = "<br>".join([f"<span style='font-size:0.7rem;color:#aaa;'>• {msg}</span>" for msg in filter_msgs[:6]])
-            st.markdown(f"""
-            <div style='background:#1a1a2e; border:2px solid {border}; border-radius:20px; padding:15px; margin:10px 0;'>
-                <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;'>
-                    <h3>{emoji} {o['direction']} {o['type']} RUNNING</h3>
-                    <div style='display:flex; gap:5px; align-items:center; flex-wrap:wrap;'>
-                        <span class='{badge_class}'>{val_status}</span>
-                        {risk_badge}
+    # --- RUNNING ORDERS (hanya untuk Limit / Konservatif) ---
+    if st.session_state.exec_mode == "Konservatif":
+        running = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
+        if running:
+            st.markdown("---")
+            st.markdown("### ⚡ Running Orders (Aktif)")
+            for o in running:
+                emoji = "🔴" if o["direction"] == "SELL" else "🟢"
+                border = "#ff4444" if o["direction"] == "SELL" else "#00ff88"
+                val_status = o.get("validation_status", "")
+                badge_class = "badge-valid"
+                if "INDUCEMENT" in val_status: badge_class = "badge-induce"
+                elif "BREAKER" in val_status: badge_class = "badge-breaker"
+                elif "FAKE" in val_status or "FAKE" in o.get("risk_label", ""): badge_class = "badge-fake"
+                elif "TOO FAST" in val_status: badge_class = "badge-toofast"
+                elif "NEEDS" in val_status or "NEED" in val_status: badge_class = "badge-wait"
+                risk_badge = ""
+                if "SAFE" in o.get("risk_label", ""): risk_badge = "<span class='risk-safe'>✅ SAFE</span>"
+                elif "HIGH RISK" in o.get("risk_label", ""): risk_badge = "<span class='risk-high'>⚠️ HIGH RISK</span>"
+                else: risk_badge = "<span class='risk-wait'>⏳ Need Confirmation</span>"
+                filter_msgs = o.get("filter_msgs", [])
+                filter_html = "<br>".join([f"<span style='font-size:0.7rem;color:#aaa;'>• {msg}</span>" for msg in filter_msgs[:6]])
+                st.markdown(f"""
+                <div style='background:#1a1a2e; border:2px solid {border}; border-radius:20px; padding:15px; margin:10px 0;'>
+                    <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;'>
+                        <h3>{emoji} {o['direction']} {o['type']} RUNNING</h3>
+                        <div style='display:flex; gap:5px; align-items:center; flex-wrap:wrap;'>
+                            <span class='{badge_class}'>{val_status}</span>
+                            {risk_badge}
+                        </div>
+                    </div>
+                    <div class='order-grid'>
+                        <div><span class='label'>Entry</span><br><b>{o['entry']}</b></div>
+                        <div><span class='label'>SL</span><br><b style='color:#ff4444;'>{o['sl']}</b></div>
+                        <div><span class='label'>TP1 (1:1.2)</span><br><b>{o['tp1']}</b></div>
+                        <div><span class='label'>TP2 (1:2)</span><br><b>{o['tp2']}</b></div>
+                        <div><span class='label'>TP3 (1:4)</span><br><b>{o['tp3']}</b></div>
+                    </div>
+                    <div class='zone-footer'>
+                        <small>{o['reason']}</small><br>
+                        {filter_html}
                     </div>
                 </div>
-                <div class='order-grid'>
-                    <div><span class='label'>Entry</span><br><b>{o['entry']}</b></div>
-                    <div><span class='label'>SL</span><br><b style='color:#ff4444;'>{o['sl']}</b></div>
-                    <div><span class='label'>TP1 (1:1.2)</span><br><b>{o['tp1']}</b></div>
-                    <div><span class='label'>TP2 (1:2)</span><br><b>{o['tp2']}</b></div>
-                    <div><span class='label'>TP3 (1:4)</span><br><b>{o['tp3']}</b></div>
-                </div>
-                <div class='zone-footer'>
-                    <small>{o['reason']}</small><br>
-                    {filter_html}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class='footer'>
-        <small>© 2026 Alu System — XAUUSD. SL Scalping dibatasi: Sangat Tinggi ≤15pt, Tinggi ≤10pt, Sedang/Rendah ≤8pt.</small><br>
+        <small>© 2026 Alu System — XAUUSD. Konservatif: Limit di Zona | Agresif: Market Now.</small><br>
         <small>⚠️ Sinyal bukan rekomendasi investasi. Gunakan manajemen risiko.</small>
     </div>
     """, unsafe_allow_html=True)
