@@ -10,7 +10,14 @@ import pytz
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from streamlit_autorefresh import st_autorefresh
+
+# ==================== AUTO REFRESH (Fallback jika library tidak ada) ====================
+try:
+    from streamlit_autorefresh import st_autorefresh
+    HAS_AUTOREFRESH = True
+except ImportError:
+    HAS_AUTOREFRESH = False
+    st.info("ℹ️ Untuk auto refresh lebih stabil, install: pip install streamlit-autorefresh")
 
 # ==================== AUTHENTICATION ====================
 def hash_password(password):
@@ -474,39 +481,45 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     range_high = float(daily_df["High"].iloc[-5:].max())
     range_low = float(daily_df["Low"].iloc[-5:].min())
 
-    # ========== Tentukan Timeframe berdasarkan mode ==========
+    # ========== Tentukan Timeframe ==========
+    use_m3 = False
     if mode == "Scalping":
-        # Hybrid M1/M3: zone dari 3m, entry dari 1m
+        # Coba buat M3 dari M1
         df_1m = dfs.get("1m")
         if df_1m is not None and not df_1m.empty:
             try:
-                df_3m = df_1m.resample('3T').agg({
+                # Pastikan indeks datetime
+                if not isinstance(df_1m.index, pd.DatetimeIndex):
+                    df_1m = df_1m.reset_index()
+                    for col in df_1m.columns:
+                        if 'datetime' in col.lower() or 'date' in col.lower() or 'time' in col.lower():
+                            df_1m = df_1m.set_index(col)
+                            break
+                    if not isinstance(df_1m.index, pd.DatetimeIndex):
+                        df_1m.index = pd.to_datetime(df_1m.index)
+                
+                df_3m = df_1m.resample('3min').agg({
                     'Open': 'first',
                     'High': 'max',
                     'Low': 'min',
                     'Close': 'last',
                     'Volume': 'sum'
                 }).dropna()
-                if not df_3m.empty:
+                
+                if not df_3m.empty and len(df_3m) > 5:
                     dfs["3m"] = df_3m
+                    use_m3 = True
                     zone_tf = "3m"
                     entry_tf = "1m"
                     base_sl_mult = 0.5
                     max_dist = 3.0
                 else:
-                    st.warning("⚠️ Gagal buat 3m, fallback ke 5m")
-                    zone_tf = "5m"
-                    entry_tf = "5m"
-                    base_sl_mult = 0.6
-                    max_dist = 3.0
-            except:
-                st.warning("⚠️ Error resample, fallback ke 5m")
-                zone_tf = "5m"
-                entry_tf = "5m"
-                base_sl_mult = 0.6
-                max_dist = 3.0
-        else:
-            st.warning("⚠️ Data 1m tidak tersedia, fallback ke 5m")
+                    use_m3 = False
+            except Exception:
+                use_m3 = False
+        
+        if not use_m3:
+            # Fallback ke M5
             zone_tf = "5m"
             entry_tf = "5m"
             base_sl_mult = 0.6
@@ -543,12 +556,22 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
 
     # ========== Batas SL untuk Scalping ==========
     if mode == "Scalping":
-        if vol_label == "SANGAT TINGGI":
-            max_sl_points = 12.0
-        elif vol_label == "TINGGI":
-            max_sl_points = 8.0
+        if use_m3:
+            # M3 lebih cepat, SL lebih ketat
+            if vol_label == "SANGAT TINGGI":
+                max_sl_points = 12.0
+            elif vol_label == "TINGGI":
+                max_sl_points = 8.0
+            else:
+                max_sl_points = 6.0
         else:
-            max_sl_points = 6.0
+            # M5
+            if vol_label == "SANGAT TINGGI":
+                max_sl_points = 15.0
+            elif vol_label == "TINGGI":
+                max_sl_points = 10.0
+            else:
+                max_sl_points = 8.0
         sl_calc = atr * base_sl_mult
         sl_mult = max_sl_points / atr if sl_calc > max_sl_points else base_sl_mult
     else:
@@ -966,8 +989,14 @@ elif st.session_state.role == "admin":
 
 # ==================== USER DASHBOARD ====================
 else:
-    # Auto refresh setiap 30 detik
-    st_autorefresh(interval=30000, key="auto_refresh")
+    # ========== AUTO REFRESH (jika library ada) ==========
+    if HAS_AUTOREFRESH:
+        st_autorefresh(interval=30000, key="auto_refresh")
+    else:
+        # Fallback: meta refresh
+        components.html("""
+        <meta http-equiv="refresh" content="30">
+        """, height=0)
     
     # --- SIDEBAR ---
     with st.sidebar:
@@ -1321,7 +1350,7 @@ else:
 
     st.markdown("""
     <div class='footer'>
-        <small>© 2026 Alu System — XAUUSD. Scalping: M1/M3 hybrid | Intraday: 15m/1h.</small><br>
+        <small>© 2026 Alu System — XAUUSD. Scalping: M1/M3 hybrid (fallback M5) | Intraday: 15m/1h.</small><br>
         <small>⚠️ Sinyal bukan rekomendasi investasi. Gunakan manajemen risiko.</small>
     </div>
     """, unsafe_allow_html=True)
