@@ -237,10 +237,6 @@ def detect_cisd(df):
 
 # ==================== VOLUME, ADX, POC ====================
 def check_volume_strength(df, lookback=20, multiplier=1.5):
-    """
-    Cek kekuatan volume candle terakhir terhadap rata-rata.
-    Returns: STRONG, MODERATE, WEAK
-    """
     if "Volume" not in df.columns or df["Volume"].sum() == 0:
         return "N/A", "Volume data unavailable"
     if len(df) < lookback:
@@ -251,7 +247,6 @@ def check_volume_strength(df, lookback=20, multiplier=1.5):
     if avg_vol == 0:
         return "N/A", "Volume zero"
     ratio = last_vol / avg_vol
-    
     if ratio >= multiplier:
         return "STRONG", f"{ratio:.1f}x avg"
     elif ratio >= 1.0:
@@ -260,11 +255,8 @@ def check_volume_strength(df, lookback=20, multiplier=1.5):
         return "WEAK", f"{ratio:.1f}x avg"
 
 def calculate_adx(df, period=14):
-    """
-    Hitung ADX untuk mengukur kekuatan tren.
-    """
     if len(df) < period + 1:
-        return 0, "Data tidak cukup untuk ADX"
+        return 0, "Data tidak cukup"
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
@@ -285,9 +277,6 @@ def calculate_adx(df, period=14):
     return round(adx, 2), status
 
 def find_poc(df, lookback=50):
-    """
-    Cari Point of Control (level dengan volume tertinggi).
-    """
     if "Volume" not in df.columns or len(df) < lookback:
         return None, "Volume data tidak cukup"
     df_slice = df.iloc[-lookback:]
@@ -300,7 +289,7 @@ def find_poc(df, lookback=50):
 # ==================== FILTER LANJUTAN ====================
 def detect_inducement(df, zone_high, zone_low, direction):
     if len(df) < 10:
-        return False, "Data tidak cukup untuk deteksi inducement"
+        return False, "Data tidak cukup"
     recent = df.iloc[-10:]
     if direction == "BUY":
         lows = recent["Low"].values
@@ -312,7 +301,7 @@ def detect_inducement(df, zone_high, zone_low, direction):
         for i in range(1, len(highs)):
             if highs[i] > highs[i-1]:
                 return True, f"⚠️ Inducement (Buy trap di {highs[i]:.2f})"
-    return False, "Tidak ada inducement signifikan"
+    return False, "Tidak ada inducement"
 
 def detect_breaker_block(df, zone_high, zone_low, direction):
     if len(df) < 20:
@@ -476,7 +465,7 @@ def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premiu
     desc += f"ATR: {round((df['High'] - df['Low']).rolling(14).mean().iloc[-1], 2)}."
     return desc
 
-# ==================== SIGNAL GENERATOR (FULL) ====================
+# ==================== SIGNAL GENERATOR ====================
 def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
@@ -485,7 +474,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     daily_df = dfs.get("1d")
     if daily_df is None or daily_df.empty or len(daily_df) < 10:
         return None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data daily tidak cukup."
-    
+
     sh_d, sl_d = find_swings(daily_df, 2)
     bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
     bias = "BUY" if bull_bias else ("SELL" if bear_bias else "NEUTRAL")
@@ -501,11 +490,18 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     eqh, eql = detect_eqh_eql(htf_df if len(htf_df) > 20 else daily_df, strength=2, tolerance=1.0)
     range_high = float(daily_df["High"].iloc[-5:].max())
     range_low = float(daily_df["Low"].iloc[-5:].min())
-    
+
+    # ========== PERUBAHAN UTAMA UNTUK SCALPING ==========
     if mode == "Scalping":
-        zone_tf = "5m"; entry_tf = "5m"; sl_mult = 1.0; max_dist = 3.0
-    else:
-        zone_tf = "1h"; entry_tf = "15m"; sl_mult = 1.5; max_dist = 5.0
+        zone_tf = "5m"
+        entry_tf = "5m"
+        sl_mult = 0.6          # <--- SL = 0.6 x ATR (misal ATR=10 -> SL=6 poin)
+        max_dist = 3.0
+    else:  # Intraday
+        zone_tf = "1h"
+        entry_tf = "15m"
+        sl_mult = 1.5
+        max_dist = 5.0
 
     zone_df = dfs.get(zone_tf)
     if zone_df is None or zone_df.empty:
@@ -559,12 +555,10 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
             if best_demand is None or z["low"] > best_demand["low"]:
                 best_demand = z
 
-    # ==================== ANALISIS VOLUME, ADX, POC ====================
+    # ========== VOLUME, ADX, POC ==========
     vol_status, vol_detail = check_volume_strength(entry_df, lookback=20, multiplier=1.5)
     adx_val, adx_status = calculate_adx(entry_df, period=14)
     poc_price, poc_detail = find_poc(entry_df, lookback=50)
-
-    # Cek apakah PoC berimpit dengan zona
     poc_confluence = False
     if poc_price and best_supply:
         if best_supply["low"] <= poc_price <= best_supply["high"]:
@@ -573,6 +567,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         if best_demand["low"] <= poc_price <= best_demand["high"]:
             poc_confluence = True
 
+    # ========== FILTERS ==========
     def check_rejection_candle(df, zone_high, zone_low, direction):
         if len(df) < 2:
             return False, "Data candle tidak cukup"
@@ -626,7 +621,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         breaker_ok, breaker_msg = detect_breaker_block(entry_df, zone["high"], zone["low"], direction)
         choch_type, choch_msg = detect_choch(entry_df)
         bos_ok, bos_msg = detect_bos_bpr(entry_df)
-        
+
         all_passed = all([wick_ok, speed_ok, bias_ok, not induce_ok, not breaker_ok])
         if all_passed:
             status = "✅ ZONE VALID"
@@ -638,17 +633,16 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         elif not speed_ok: status = "🔥 TOO FAST"; risk = "HIGH RISK"
         elif not bias_ok: status = "🚫 BIAS CONFLICT"; risk = "HIGH RISK"
         else: status = "⚠️ UNKNOWN"; risk = "HIGH RISK"
-        
+
         if choch_type: status += f" | {choch_msg}"
         if bos_ok: status += f" | {bos_msg}"
-        
-        # Tambahkan Volume, ADX, PoC ke pesan
+
         extra_msgs = []
         extra_msgs.append(f"📊 VOL: {vol_status} ({vol_detail})")
         extra_msgs.append(f"📈 ADX: {adx_val} ({adx_status})")
         if poc_price: extra_msgs.append(f"🎯 PoC: {poc_price}")
         if poc_confluence: extra_msgs.append("🔥 PoC CONFLUENCE!")
-        
+
         return status, risk, [wick_msg, speed_msg, bias_msg, induce_msg, breaker_msg] + extra_msgs
 
     def build_order(order_type, direction, entry, sl, tp1, tp2, tp3, reason, zone_info="", validation_status="", risk_label="SAFE", filter_msgs=None):
@@ -686,14 +680,16 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
             f"OB: {best_demand['low']:.2f}-{best_demand['high']:.2f}", val_status, risk_label, filter_msgs)
 
     if nearest_lows:
-        entry = nearest_lows[0] - (atr * 0.5); sl = nearest_lows[0] + (atr * 1.0)
+        entry = nearest_lows[0] - (atr * 0.5)
+        sl = nearest_lows[0] + (atr * 1.0)
         tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
         orders["sell_stop"] = build_order("STOP", "SELL", entry, sl, tp1, tp2, tp3,
             f"Sell Stop di bawah Swing Low {nearest_lows[0]:.2f}", "", "🔥 STOP ORDER", "HIGH RISK",
             [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})"])
 
     if nearest_highs:
-        entry = nearest_highs[0] + (atr * 0.5); sl = nearest_highs[0] - (atr * 1.0)
+        entry = nearest_highs[0] + (atr * 0.5)
+        sl = nearest_highs[0] - (atr * 1.0)
         tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
         orders["buy_stop"] = build_order("STOP", "BUY", entry, sl, tp1, tp2, tp3,
             f"Buy Stop di atas Swing High {nearest_highs[0]:.2f}", "", "🔥 STOP ORDER", "HIGH RISK",
@@ -787,7 +783,7 @@ if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.markdown("<br><br><h1 style='text-align:center;color:#FFD700;'>🥇 XAUUSD SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>Volume + ADX + PoC + 5 Filter</p><br>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>SL Scalping &lt; 10 poin | Volume + ADX + PoC</p><br>", unsafe_allow_html=True)
         role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
         u = st.text_input("Username", value=st.session_state.saved_user)
         p = st.text_input("Password", type="password", value=st.session_state.saved_pass)
@@ -1009,7 +1005,7 @@ else:
     components.html(tv_html, height=520)
 
     st.markdown("---")
-    st.markdown("### 📊 4 Jenis Order + Volume, ADX, PoC")
+    st.markdown("### 📊 4 Jenis Order + Volume, ADX, PoC (SL Scalping < 10 poin)")
 
     # --- TRIGGER LOGIC ---
     live_price = None
@@ -1146,7 +1142,7 @@ else:
 
     st.markdown("""
     <div class='footer'>
-        <small>© 2026 Alu System — XAUUSD. Fitur: Volume, ADX, PoC, Inducement, Breaker, CHoCH, BOS BPR.</small><br>
+        <small>© 2026 Alu System — XAUUSD. SL Scalping = 0.6 x ATR (≈6-8 poin) | TP1=1:1.2, TP2=1:2, TP3=1:4.</small><br>
         <small>⚠️ Sinyal bukan rekomendasi investasi. Gunakan manajemen risiko.</small>
     </div>
     """, unsafe_allow_html=True)
