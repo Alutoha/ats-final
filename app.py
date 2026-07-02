@@ -11,13 +11,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-# ==================== AUTO REFRESH (Fallback jika library tidak ada) ====================
+# ==================== AUTO REFRESH (Fallback) ====================
 try:
     from streamlit_autorefresh import st_autorefresh
     HAS_AUTOREFRESH = True
 except ImportError:
     HAS_AUTOREFRESH = False
-    st.info("ℹ️ Untuk auto refresh lebih stabil, install: pip install streamlit-autorefresh")
 
 # ==================== AUTHENTICATION ====================
 def hash_password(password):
@@ -332,20 +331,20 @@ def detect_choch(df):
 
 def detect_bos_bpr(df):
     if len(df) < 15:
-        return False, "Data tidak cukup"
+        return False, "Belum ada BOS/BPR"
     sh, sl = find_swings(df.iloc[-15:], strength=2)
     last_close = df["Close"].iloc[-1]
     if len(sh) >= 1 and last_close > df["High"].iloc[sh[-1]]:
-        return True, "✅ BOS Bullish"
+        return "BULLISH_BOS", "✅ BOS Bullish"
     if len(sl) >= 1 and last_close < df["Low"].iloc[sl[-1]]:
-        return True, "✅ BOS Bearish"
+        return "BEARISH_BOS", "✅ BOS Bearish"
     range_high = df["High"].iloc[-5:].max()
     range_low = df["Low"].iloc[-5:].min()
     if last_close > range_high:
-        return True, "✅ BPR Bullish"
+        return "BULLISH_BPR", "✅ BPR Bullish"
     if last_close < range_low:
-        return True, "✅ BPR Bearish"
-    return False, "Belum ada BOS/BPR"
+        return "BEARISH_BPR", "✅ BPR Bearish"
+    return None, "Belum ada BOS/BPR"
 
 # ==================== PIVOT, EQH/EQL, PREMIUM, PATTERN, QM ====================
 def calculate_pivots(daily_df):
@@ -484,11 +483,9 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     # ========== Tentukan Timeframe ==========
     use_m3 = False
     if mode == "Scalping":
-        # Coba buat M3 dari M1
         df_1m = dfs.get("1m")
         if df_1m is not None and not df_1m.empty:
             try:
-                # Pastikan indeks datetime
                 if not isinstance(df_1m.index, pd.DatetimeIndex):
                     df_1m = df_1m.reset_index()
                     for col in df_1m.columns:
@@ -497,7 +494,6 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
                             break
                     if not isinstance(df_1m.index, pd.DatetimeIndex):
                         df_1m.index = pd.to_datetime(df_1m.index)
-                
                 df_3m = df_1m.resample('3min').agg({
                     'Open': 'first',
                     'High': 'max',
@@ -505,7 +501,6 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
                     'Close': 'last',
                     'Volume': 'sum'
                 }).dropna()
-                
                 if not df_3m.empty and len(df_3m) > 5:
                     dfs["3m"] = df_3m
                     use_m3 = True
@@ -515,16 +510,14 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
                     max_dist = 3.0
                 else:
                     use_m3 = False
-            except Exception:
+            except:
                 use_m3 = False
-        
         if not use_m3:
-            # Fallback ke M5
             zone_tf = "5m"
             entry_tf = "5m"
             base_sl_mult = 0.6
             max_dist = 3.0
-    else:  # Intraday
+    else:
         zone_tf = "1h"
         entry_tf = "15m"
         base_sl_mult = 1.5
@@ -554,24 +547,12 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     else:
         vol_label = "SANGAT TINGGI"
 
-    # ========== Batas SL untuk Scalping ==========
+    # ========== Batas SL ==========
     if mode == "Scalping":
         if use_m3:
-            # M3 lebih cepat, SL lebih ketat
-            if vol_label == "SANGAT TINGGI":
-                max_sl_points = 12.0
-            elif vol_label == "TINGGI":
-                max_sl_points = 8.0
-            else:
-                max_sl_points = 6.0
+            max_sl_points = 12.0 if vol_label == "SANGAT TINGGI" else (8.0 if vol_label == "TINGGI" else 6.0)
         else:
-            # M5
-            if vol_label == "SANGAT TINGGI":
-                max_sl_points = 15.0
-            elif vol_label == "TINGGI":
-                max_sl_points = 10.0
-            else:
-                max_sl_points = 8.0
+            max_sl_points = 15.0 if vol_label == "SANGAT TINGGI" else (10.0 if vol_label == "TINGGI" else 8.0)
         sl_calc = atr * base_sl_mult
         sl_mult = max_sl_points / atr if sl_calc > max_sl_points else base_sl_mult
     else:
@@ -605,12 +586,16 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
         elif fvg["type"] == "bullish":
             demand_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
 
-    best_supply, best_demand = None, None
+    # Filter zona yang valid berdasarkan posisi harga
+    best_supply = None
+    best_demand = None
     for z in supply_zones:
+        # Supply zone harus di ATAS harga
         if z["high"] > price and (z["high"] - price) < max_dist * atr:
             if best_supply is None or z["high"] < best_supply["high"]:
                 best_supply = z
     for z in demand_zones:
+        # Demand zone harus di BAWAH harga
         if z["low"] < price and (price - z["low"]) < max_dist * atr:
             if best_demand is None or z["low"] > best_demand["low"]:
                 best_demand = z
@@ -665,8 +650,10 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     def mitigate_entry(zone, direction):
         zone_width = zone["high"] - zone["low"]
         if direction == "BUY":
+            # Entry di 38.2% dari bawah (masuk ke dalam zona)
             return round(zone["low"] + (zone_width * 0.382), 2)
         else:
+            # Entry di 38.2% dari atas (masuk ke dalam zona)
             return round(zone["high"] - (zone_width * 0.382), 2)
 
     def run_all_filters(zone, direction):
@@ -676,22 +663,52 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
         induce_ok, induce_msg = detect_inducement(entry_df, zone["high"], zone["low"], direction)
         breaker_ok, breaker_msg = detect_breaker_block(entry_df, zone["high"], zone["low"], direction)
         choch_type, choch_msg = detect_choch(entry_df)
-        bos_ok, bos_msg = detect_bos_bpr(entry_df)
+        bos_type, bos_msg = detect_bos_bpr(entry_df)
+
+        # === BOS harus sesuai arah ===
+        if direction == "SELL":
+            bos_ok = (bos_type == "BEARISH_BOS" or bos_type == "BEARISH_BPR")
+            bos_display = "BOS Bearish" if bos_ok else ""
+        else:  # BUY
+            bos_ok = (bos_type == "BULLISH_BOS" or bos_type == "BULLISH_BPR")
+            bos_display = "BOS Bullish" if bos_ok else ""
 
         all_passed = all([wick_ok, speed_ok, bias_ok, not induce_ok, not breaker_ok])
-        if all_passed:
+        if all_passed and bos_ok:
             status = "✅ ZONE VALID"
             risk = "SAFE"
-        elif induce_ok: status = "⚠️ INDUCEMENT DETECTED"; risk = "HIGH RISK"
-        elif breaker_ok: status = "⚠️ BREAKER BLOCK"; risk = "HIGH RISK"
-        elif not wick_ok and "Belum sentuh zona" in wick_msg: status = "⏳ NEEDS WICK"; risk = "NEED CONFIRMATION"
-        elif not wick_ok: status = "⚠️ FAKE ZONE"; risk = "HIGH RISK"
-        elif not speed_ok: status = "🔥 TOO FAST"; risk = "HIGH RISK"
-        elif not bias_ok: status = "🚫 BIAS CONFLICT"; risk = "HIGH RISK"
-        else: status = "⚠️ UNKNOWN"; risk = "HIGH RISK"
+        elif induce_ok:
+            status = "⚠️ INDUCEMENT DETECTED"
+            risk = "HIGH RISK"
+        elif breaker_ok:
+            status = "⚠️ BREAKER BLOCK"
+            risk = "HIGH RISK"
+        elif not wick_ok and "Belum sentuh zona" in wick_msg:
+            status = "⏳ NEEDS WICK"
+            risk = "NEED CONFIRMATION"
+        elif not wick_ok:
+            status = "⚠️ FAKE ZONE"
+            risk = "HIGH RISK"
+        elif not speed_ok:
+            status = "🔥 TOO FAST"
+            risk = "HIGH RISK"
+        elif not bias_ok:
+            status = "🚫 BIAS CONFLICT"
+            risk = "HIGH RISK"
+        elif not bos_ok and bos_type is not None:
+            status = f"⚠️ {bos_msg} (not aligned)"
+            risk = "HIGH RISK"
+        else:
+            status = "⚠️ UNKNOWN"
+            risk = "HIGH RISK"
 
-        if choch_type: status += f" | {choch_msg}"
-        if bos_ok: status += f" | {bos_msg}"
+        # Tambahkan BOS jika ada
+        if bos_ok and bos_msg:
+            status += f" | {bos_msg}"
+        elif bos_type and not bos_ok:
+            status += f" | {bos_msg} (not aligned)"
+        if choch_type:
+            status += f" | {choch_msg}"
 
         extra_msgs = [
             f"📊 VOL: {vol_status} ({vol_detail})",
@@ -700,8 +717,10 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
         ]
         if mode == "Scalping":
             extra_msgs.append(f"🛡️ SL ~ {atr*sl_mult:.2f} poin (max {max_sl_points})")
-        if poc_price: extra_msgs.append(f"🎯 PoC: {poc_price}")
-        if poc_confluence: extra_msgs.append("🔥 PoC CONFLUENCE!")
+        if poc_price:
+            extra_msgs.append(f"🎯 PoC: {poc_price}")
+        if poc_confluence:
+            extra_msgs.append("🔥 PoC CONFLUENCE!")
 
         return status, risk, [wick_msg, speed_msg, bias_msg, induce_msg, breaker_msg] + extra_msgs
 
@@ -718,17 +737,18 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
 
     def calc_tp_rr(entry, sl, direction):
         risk = abs(entry - sl)
-        if risk < 0.01: risk = 1.0
+        if risk < 0.01:
+            risk = 1.0
         if direction == "BUY":
             return round(entry + risk*1.2, 2), round(entry + risk*2.0, 2), round(entry + risk*4.0, 2)
         else:
             return round(entry - risk*1.2, 2), round(entry - risk*2.0, 2), round(entry - risk*4.0, 2)
 
     orders = {"sell": None, "buy": None}
-    best_direction = None
 
     # === KONSERVATIF (LIMIT) ===
     if exec_mode == "Konservatif":
+        # SELL LIMIT hanya jika best_supply valid (harga di bawah supply)
         if best_supply:
             entry = mitigate_entry(best_supply, "SELL")
             sl = best_supply["high"] + (atr * sl_mult)
@@ -738,6 +758,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
                 f"Sell Limit di Supply OB {best_supply['low']:.2f}-{best_supply['high']:.2f}",
                 f"OB: {best_supply['low']:.2f}-{best_supply['high']:.2f}",
                 val_status, risk_label, filter_msgs)
+        # BUY LIMIT hanya jika best_demand valid (harga di atas demand)
         if best_demand:
             entry = mitigate_entry(best_demand, "BUY")
             sl = best_demand["low"] - (atr * sl_mult)
@@ -767,12 +788,11 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
             sell_pct = round((sell_score / total) * 100)
             buy_pct = 100 - sell_pct
 
+        best_direction = None
         if sell_pct >= 60:
             best_direction = "SELL"
         elif buy_pct >= 60:
             best_direction = "BUY"
-        else:
-            best_direction = None
 
         if best_direction == "SELL":
             entry = price
@@ -820,12 +840,18 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     if nearest_highs and (nearest_highs[0] - price) < atr * 2: buy_score += 10
 
     total = sell_score + buy_score
-    if total == 0: sell_pct, buy_pct = 50, 50
-    else: sell_pct = round((sell_score / total) * 100); buy_pct = 100 - sell_pct
+    if total == 0:
+        sell_pct, buy_pct = 50, 50
+    else:
+        sell_pct = round((sell_score / total) * 100)
+        buy_pct = 100 - sell_pct
 
-    if sell_pct >= 65: rec_direction = "SELL"; rec_label = "RECOMMENDED" if sell_pct >= 75 else "HIGH RISK"
-    elif buy_pct >= 65: rec_direction = "BUY"; rec_label = "RECOMMENDED" if buy_pct >= 75 else "HIGH RISK"
-    else: rec_direction = "NEUTRAL"; rec_label = "WAIT & SEE"
+    if sell_pct >= 65:
+        rec_direction = "SELL"; rec_label = "RECOMMENDED" if sell_pct >= 75 else "HIGH RISK"
+    elif buy_pct >= 65:
+        rec_direction = "BUY"; rec_label = "RECOMMENDED" if buy_pct >= 75 else "HIGH RISK"
+    else:
+        rec_direction = "NEUTRAL"; rec_label = "WAIT & SEE"
     confidence = {"sell": sell_pct, "buy": buy_pct, "direction": rec_direction, "label": rec_label}
 
     diff = abs(sell_pct - buy_pct)
@@ -855,7 +881,6 @@ if "logged_in" not in st.session_state:
     st.session_state.trigger_counter = 0
     st.session_state.saved_user = ""
     st.session_state.saved_pass = ""
-    st.session_state.refresh_agresif = 0
 
 st.set_page_config(page_title="XAUUSD - Alu System", page_icon="🥇", layout="wide")
 init_db()
@@ -989,15 +1014,14 @@ elif st.session_state.role == "admin":
 
 # ==================== USER DASHBOARD ====================
 else:
-    # ========== AUTO REFRESH (jika library ada) ==========
+    # Auto refresh
     if HAS_AUTOREFRESH:
         st_autorefresh(interval=30000, key="auto_refresh")
     else:
-        # Fallback: meta refresh
         components.html("""
         <meta http-equiv="refresh" content="30">
         """, height=0)
-    
+
     # --- SIDEBAR ---
     with st.sidebar:
         st.markdown(f"<h3 style='color:#FFD700;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
@@ -1064,7 +1088,6 @@ else:
             st.rerun()
 
     st.markdown("---")
-    # Mode Eksekusi (hanya untuk Scalping)
     if st.session_state.mode == "Scalping":
         exec_opts = ["🎯 Konservatif (Limit di Zona)", "🚀 Agresif (Market Now)"]
         idx = 0 if st.session_state.exec_mode == "Konservatif" else 1
@@ -1109,7 +1132,7 @@ else:
             <div class='ohlc-box'><span class='ohlc-label'>Close</span><br><span class='ohlc-value'>{ohlc['Close']}</span></div>
         </div>""", unsafe_allow_html=True)
 
-    # --- CONFLUENCE SIGNAL ---
+    # --- CONFLUENCE ---
     if confluence:
         sell_pct = confluence['sell']
         buy_pct = confluence['buy']
@@ -1195,7 +1218,7 @@ else:
     st.markdown("---")
     st.markdown("### 📊 Sinyal Eksekusi")
 
-    # --- TRIGGER LOGIK (hanya untuk Konservatif / Limit) ---
+    # --- TRIGGER LOGIC ---
     live_price = None
     try:
         df_live = yf.download("GC=F", period="1d", interval="1m")
@@ -1203,7 +1226,6 @@ else:
             live_price = float(df_live["Close"].iloc[-1])
     except: pass
 
-    # Untuk Limit (Konservatif) kita jalankan trigger seperti biasa
     if st.session_state.exec_mode == "Konservatif" and live_price is not None:
         to_remove = []
         for o in st.session_state.triggered_orders:
@@ -1214,7 +1236,6 @@ else:
                 to_remove.append(o["id"])
         st.session_state.triggered_orders = [o for o in st.session_state.triggered_orders if o["id"] not in to_remove]
 
-        # Trigger Limit
         if orders.get("sell") and orders["sell"]["type"] == "LIMIT":
             if live_price >= orders["sell"]["entry"]:
                 if not any(o["entry"] == orders["sell"]["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
@@ -1239,7 +1260,7 @@ else:
         badge_class = "badge-valid"
         if "INDUCEMENT" in val_status: badge_class = "badge-induce"
         elif "BREAKER" in val_status: badge_class = "badge-breaker"
-        elif "FAKE" in val_status or "FAKE" in order.get("risk_label", ""): badge_class = "badge-fake"
+        elif "FAKE" in val_status: badge_class = "badge-fake"
         elif "TOO FAST" in val_status: badge_class = "badge-toofast"
         elif "NEEDS" in val_status or "NEED" in val_status: badge_class = "badge-wait"
         
@@ -1289,7 +1310,7 @@ else:
             if orders.get("sell"):
                 st.markdown(render_order_card(orders["sell"], "sell"), unsafe_allow_html=True)
             else:
-                st.info("📭 Tidak ada Supply Zone valid")
+                st.info("📭 Tidak ada Supply Zone valid di atas harga")
     with col_buy:
         st.markdown("#### 🔺 BUY Order")
         if st.session_state.exec_mode == "Agresif" and st.session_state.mode == "Scalping":
@@ -1301,9 +1322,9 @@ else:
             if orders.get("buy"):
                 st.markdown(render_order_card(orders["buy"], "buy"), unsafe_allow_html=True)
             else:
-                st.info("📭 Tidak ada Demand Zone valid")
+                st.info("📭 Tidak ada Demand Zone valid di bawah harga")
 
-    # --- RUNNING ORDERS (Limit / Konservatif) ---
+    # --- RUNNING ORDERS ---
     if st.session_state.exec_mode == "Konservatif":
         running = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
         if running:
@@ -1316,7 +1337,7 @@ else:
                 badge_class = "badge-valid"
                 if "INDUCEMENT" in val_status: badge_class = "badge-induce"
                 elif "BREAKER" in val_status: badge_class = "badge-breaker"
-                elif "FAKE" in val_status or "FAKE" in o.get("risk_label", ""): badge_class = "badge-fake"
+                elif "FAKE" in val_status: badge_class = "badge-fake"
                 elif "TOO FAST" in val_status: badge_class = "badge-toofast"
                 elif "NEEDS" in val_status or "NEED" in val_status: badge_class = "badge-wait"
                 risk_badge = ""
