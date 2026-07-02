@@ -10,6 +10,7 @@ import pytz
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from streamlit_autorefresh import st_autorefresh
 
 # ==================== AUTHENTICATION ====================
 def hash_password(password):
@@ -448,7 +449,7 @@ def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premiu
     return desc
 
 # ==================== SIGNAL GENERATOR ====================
-def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
+def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservatif"):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
         return None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data tidak lengkap."
@@ -473,8 +474,9 @@ def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
     range_high = float(daily_df["High"].iloc[-5:].max())
     range_low = float(daily_df["Low"].iloc[-5:].min())
 
-    # ========== Tentukan Timeframe ==========
-    if mode == "M3":
+    # ========== Tentukan Timeframe berdasarkan mode ==========
+    if mode == "Scalping":
+        # Hybrid M1/M3: zone dari 3m, entry dari 1m
         df_1m = dfs.get("1m")
         if df_1m is not None and not df_1m.empty:
             try:
@@ -492,31 +494,23 @@ def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
                     base_sl_mult = 0.5
                     max_dist = 3.0
                 else:
-                    st.warning("⚠️ Gagal membuat data 3m (kosong), fallback ke M5")
-                    mode = "M5"
+                    st.warning("⚠️ Gagal buat 3m, fallback ke 5m")
                     zone_tf = "5m"
                     entry_tf = "5m"
                     base_sl_mult = 0.6
                     max_dist = 3.0
-            except Exception as e:
-                st.warning(f"⚠️ Error resample 3m: {e}, fallback ke M5")
-                mode = "M5"
+            except:
+                st.warning("⚠️ Error resample, fallback ke 5m")
                 zone_tf = "5m"
                 entry_tf = "5m"
                 base_sl_mult = 0.6
                 max_dist = 3.0
         else:
-            st.warning("⚠️ Data 1m tidak tersedia, fallback ke M5")
-            mode = "M5"
+            st.warning("⚠️ Data 1m tidak tersedia, fallback ke 5m")
             zone_tf = "5m"
             entry_tf = "5m"
             base_sl_mult = 0.6
             max_dist = 3.0
-    elif mode == "M5":
-        zone_tf = "5m"
-        entry_tf = "5m"
-        base_sl_mult = 0.6
-        max_dist = 3.0
     else:  # Intraday
         zone_tf = "1h"
         entry_tf = "15m"
@@ -548,11 +542,13 @@ def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
         vol_label = "SANGAT TINGGI"
 
     # ========== Batas SL untuk Scalping ==========
-    if mode in ["M3", "M5"]:
-        if mode == "M3":
-            max_sl_points = 12.0 if vol_label == "SANGAT TINGGI" else (8.0 if vol_label == "TINGGI" else 6.0)
-        else:  # M5
-            max_sl_points = 15.0 if vol_label == "SANGAT TINGGI" else (10.0 if vol_label == "TINGGI" else 8.0)
+    if mode == "Scalping":
+        if vol_label == "SANGAT TINGGI":
+            max_sl_points = 12.0
+        elif vol_label == "TINGGI":
+            max_sl_points = 8.0
+        else:
+            max_sl_points = 6.0
         sl_calc = atr * base_sl_mult
         sl_mult = max_sl_points / atr if sl_calc > max_sl_points else base_sl_mult
     else:
@@ -679,7 +675,7 @@ def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
             f"📈 ADX: {adx_val} ({adx_status})",
             f"⚡ Volatilitas: {vol_label} (ATR={atr:.2f})",
         ]
-        if mode in ["M3", "M5"]:
+        if mode == "Scalping":
             extra_msgs.append(f"🛡️ SL ~ {atr*sl_mult:.2f} poin (max {max_sl_points})")
         if poc_price: extra_msgs.append(f"🎯 PoC: {poc_price}")
         if poc_confluence: extra_msgs.append("🔥 PoC CONFLUENCE!")
@@ -809,7 +805,6 @@ def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
     else: rec_direction = "NEUTRAL"; rec_label = "WAIT & SEE"
     confidence = {"sell": sell_pct, "buy": buy_pct, "direction": rec_direction, "label": rec_label}
 
-    # === Buat Confluence Description ===
     diff = abs(sell_pct - buy_pct)
     if diff > 20:
         if sell_pct > buy_pct:
@@ -831,7 +826,7 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.role = None
     st.session_state.nama = None
-    st.session_state.mode = "M5"
+    st.session_state.mode = "Scalping"
     st.session_state.exec_mode = "Konservatif"
     st.session_state.triggered_orders = []
     st.session_state.trigger_counter = 0
@@ -971,6 +966,9 @@ elif st.session_state.role == "admin":
 
 # ==================== USER DASHBOARD ====================
 else:
+    # Auto refresh setiap 30 detik
+    st_autorefresh(interval=30000, key="auto_refresh")
+    
     # --- SIDEBAR ---
     with st.sidebar:
         st.markdown(f"<h3 style='color:#FFD700;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
@@ -1024,24 +1022,21 @@ else:
     else:
         ohlc = {"Open": 0, "High": 0, "Low": 0, "Close": 0}; bias = "NEUTRAL"; bias_color = "bias-neutral"
 
-    # --- MODE & EKSEKUSI ---
-    col_mode1, col_mode2, col_mode3, col_mode4 = st.columns([1,1,1,1])
+    # --- MODE BUTTONS ---
+    col_mode1, col_mode2, col_mode3 = st.columns([1,1,1])
     with col_mode1:
-        if st.button("⚡ M5", use_container_width=True, type="primary" if st.session_state.mode == "M5" else "secondary"):
-            st.session_state.mode = "M5"; st.session_state.triggered_orders = []; st.rerun()
+        if st.button("⚡ SCALPING", use_container_width=True, type="primary" if st.session_state.mode == "Scalping" else "secondary"):
+            st.session_state.mode = "Scalping"; st.session_state.triggered_orders = []; st.rerun()
     with col_mode2:
-        if st.button("⚡ M3", use_container_width=True, type="primary" if st.session_state.mode == "M3" else "secondary"):
-            st.session_state.mode = "M3"; st.session_state.triggered_orders = []; st.rerun()
-    with col_mode3:
         if st.button("📈 INTRADAY", use_container_width=True, type="primary" if st.session_state.mode == "Intraday" else "secondary"):
             st.session_state.mode = "Intraday"; st.session_state.triggered_orders = []; st.rerun()
-    with col_mode4:
+    with col_mode3:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
 
     st.markdown("---")
-    # Mode Eksekusi (hanya untuk scalping M5/M3, untuk intraday otomatis Konservatif)
-    if st.session_state.mode in ["M5", "M3"]:
+    # Mode Eksekusi (hanya untuk Scalping)
+    if st.session_state.mode == "Scalping":
         exec_opts = ["🎯 Konservatif (Limit di Zona)", "🚀 Agresif (Market Now)"]
         idx = 0 if st.session_state.exec_mode == "Konservatif" else 1
         selected = st.radio("Mode Eksekusi", exec_opts, index=idx, horizontal=True)
@@ -1074,7 +1069,7 @@ else:
     with col_h1:
         st.markdown("<h1 class='header-title'>🥇 XAUUSD</h1>", unsafe_allow_html=True)
         st.markdown(f"<span>Daily Bias: <span class='bias-badge {bias_color}'>{bias}</span></span>", unsafe_allow_html=True)
-        if st.session_state.exec_mode == "Agresif" and st.session_state.mode in ["M5", "M3"]:
+        if st.session_state.exec_mode == "Agresif" and st.session_state.mode == "Scalping":
             st.caption(f"🔄 Sinyal Agresif terakhir di-refresh: {datetime.now().strftime('%H:%M:%S')}")
     with col_h2:
         st.markdown(f"""
@@ -1159,7 +1154,7 @@ else:
     st.markdown("---")
 
     # --- CHART ---
-    tv_interval = "5" if st.session_state.mode in ["M5","M3"] else "15"
+    tv_interval = "5" if st.session_state.mode == "Scalping" else "15"
     tv_html = f"""
     <div class="tradingview-widget-container" style="height:500px; margin-top:10px; border-radius:15px; overflow:hidden; border:1px solid #2a3240;">
         <div id="tv_chart"></div>
@@ -1252,11 +1247,11 @@ else:
         </div>
         """
 
-    # --- TAMPILAN 2 KOLOM (SELL / BUY) ---
+    # --- TAMPILAN 2 KOLOM ---
     col_sell, col_buy = st.columns(2)
     with col_sell:
         st.markdown("#### 🔻 SELL Order")
-        if st.session_state.exec_mode == "Agresif" and st.session_state.mode in ["M5","M3"]:
+        if st.session_state.exec_mode == "Agresif" and st.session_state.mode == "Scalping":
             if orders.get("sell"):
                 st.markdown(render_order_card(orders["sell"], "sell"), unsafe_allow_html=True)
             elif orders.get("buy") is None:
@@ -1268,7 +1263,7 @@ else:
                 st.info("📭 Tidak ada Supply Zone valid")
     with col_buy:
         st.markdown("#### 🔺 BUY Order")
-        if st.session_state.exec_mode == "Agresif" and st.session_state.mode in ["M5","M3"]:
+        if st.session_state.exec_mode == "Agresif" and st.session_state.mode == "Scalping":
             if orders.get("buy"):
                 st.markdown(render_order_card(orders["buy"], "buy"), unsafe_allow_html=True)
             elif orders.get("sell") is None:
@@ -1279,7 +1274,7 @@ else:
             else:
                 st.info("📭 Tidak ada Demand Zone valid")
 
-    # --- RUNNING ORDERS (hanya untuk Limit / Konservatif) ---
+    # --- RUNNING ORDERS (Limit / Konservatif) ---
     if st.session_state.exec_mode == "Konservatif":
         running = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
         if running:
@@ -1326,7 +1321,7 @@ else:
 
     st.markdown("""
     <div class='footer'>
-        <small>© 2026 Alu System — XAUUSD. Konservatif: Limit di Zona | Agresif: Market Now.</small><br>
+        <small>© 2026 Alu System — XAUUSD. Scalping: M1/M3 hybrid | Intraday: 15m/1h.</small><br>
         <small>⚠️ Sinyal bukan rekomendasi investasi. Gunakan manajemen risiko.</small>
     </div>
     """, unsafe_allow_html=True)
