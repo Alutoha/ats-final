@@ -10,6 +10,7 @@ import pytz
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from collections import Counter
 
 # ==================== PASSWORD HASHING ====================
 def hash_password(password):
@@ -135,11 +136,10 @@ def extend_user(uid, days):
         conn.commit()
     conn.close()
 
-# ==================== SYMBOL MAPPING (HANYA XAUUSD) ====================
+# ==================== SYMBOL & UTILITY ====================
 SYMBOL_MAP = {"XAUUSD": "GC=F"}
 TV_SYMBOL = {"XAUUSD": "OANDA:XAUUSD"}
 
-# ==================== DATA FETCHING ====================
 @st.cache_data(ttl=300)
 def fetch_data(symbol, interval, period="7d"):
     ticker = SYMBOL_MAP.get(symbol, "GC=F")
@@ -176,7 +176,7 @@ def fetch_all_timeframes(symbol):
         result["1m"] = df
     return result
 
-# ==================== TECHNICAL FUNCTIONS ====================
+# ==================== TEKNIKAL FUNCTIONS ====================
 def find_swings(df, strength=2):
     highs = df["High"].values
     lows = df["Low"].values
@@ -187,6 +187,12 @@ def find_swings(df, strength=2):
         if lows[i] == min(lows[i-strength:i+strength+1]):
             sl.append(i)
     return sh, sl
+
+def get_swing_levels(df, n=3, strength=2):
+    sh_idx, sl_idx = find_swings(df, strength)
+    swing_highs = [float(df["High"].iloc[i]) for i in sh_idx[::-1]]
+    swing_lows = [float(df["Low"].iloc[i]) for i in sl_idx[::-1]]
+    return swing_highs[:n], swing_lows[:n]
 
 def detect_bos(df, sh, sl):
     bull, bear = False, False
@@ -214,15 +220,6 @@ def find_fvg(df):
         return {"top": prev2["Low"], "bottom": last["High"], "type": "bearish"}
     return None
 
-def find_liquidity(df, strength=2):
-    sh, sl = find_swings(df, strength)
-    bsl, ssl = None, None
-    if len(sh) >= 1:
-        bsl = df["High"].iloc[sh[-1]]
-    if len(sl) >= 1:
-        ssl = df["Low"].iloc[sl[-1]]
-    return bsl, ssl
-
 def detect_cisd(df):
     if len(df) < 5:
         return None
@@ -238,50 +235,272 @@ def detect_cisd(df):
             return "BEARISH_CISD"
     return None
 
-# ==================== SIGNAL GENERATOR (KHUSUS XAUUSD) ====================
-def generate_dual_signals(symbol="XAUUSD", mode="Intraday"):
+# ==================== PIVOT POINTS (R1-R3, S1-S3) ====================
+def calculate_pivots(daily_df):
+    if daily_df is None or daily_df.empty:
+        return None, None, None, None, None, None, None
+    last = daily_df.iloc[-1]
+    high = float(last["High"])
+    low = float(last["Low"])
+    close = float(last["Close"])
+    
+    pivot = (high + low + close) / 3
+    r1 = (2 * pivot) - low
+    r2 = pivot + (high - low)
+    r3 = high + 2 * (pivot - low)
+    s1 = (2 * pivot) - high
+    s2 = pivot - (high - low)
+    s3 = low - 2 * (high - pivot)
+    
+    return round(pivot, 2), round(r1, 2), round(r2, 2), round(r3, 2), round(s1, 2), round(s2, 2), round(s3, 2)
+
+# ==================== EQH/EQL DETECTION ====================
+def detect_eqh_eql(df, strength=2, tolerance=0.5):
+    """
+    Deteksi Equal Highs (EQH) dan Equal Lows (EQL) dari swing points.
+    tolerance dalam poin (misal 0.5 untuk XAUUSD)
+    """
+    sh_idx, sl_idx = find_swings(df, strength)
+    eqh_levels = []
+    eql_levels = []
+    
+    # Ambil nilai swing highs dan lows
+    swing_highs = [float(df["High"].iloc[i]) for i in sh_idx]
+    swing_lows = [float(df["Low"].iloc[i]) for i in sl_idx]
+    
+    # Cari EQH (high yang nilainya hampir sama)
+    for i in range(len(swing_highs)):
+        for j in range(i+1, len(swing_highs)):
+            if abs(swing_highs[i] - swing_highs[j]) <= tolerance:
+                eqh_levels.append(round((swing_highs[i] + swing_highs[j]) / 2, 2))
+    
+    # Cari EQL (low yang nilainya hampir sama)
+    for i in range(len(swing_lows)):
+        for j in range(i+1, len(swing_lows)):
+            if abs(swing_lows[i] - swing_lows[j]) <= tolerance:
+                eql_levels.append(round((swing_lows[i] + swing_lows[j]) / 2, 2))
+    
+    # Ambil yang unik
+    eqh_levels = list(set(eqh_levels))[:3] if eqh_levels else []
+    eql_levels = list(set(eql_levels))[:3] if eql_levels else []
+    
+    return eqh_levels, eql_levels
+
+# ==================== PREMIUM / DISCOUNT / EQUILIBRIUM ====================
+def calculate_premium_discount(price, range_high, range_low):
+    """Hitung premium/discount berdasarkan posisi harga dalam range"""
+    if range_high == range_low:
+        return 0, "NEUTRAL"
+    mid = (range_high + range_low) / 2
+    # Premium: harga > equilibrium, Discount: harga < equilibrium
+    diff_pct = ((price - mid) / (range_high - range_low)) * 100
+    if diff_pct > 10:
+        status = "PREMIUM (Overbought)"
+    elif diff_pct < -10:
+        status = "DISCOUNT (Oversold)"
+    else:
+        status = "EQUILIBRIUM (Fair Value)"
+    return round(diff_pct, 1), status, round(mid, 2)
+
+# ==================== CHART PATTERN DETECTION ====================
+def detect_chart_patterns(df, strength=2):
+    """
+    Deteksi pola chart sederhana: Double Top, Double Bottom, Head & Shoulders (sederhana)
+    """
+    sh_idx, sl_idx = find_swings(df.iloc[-30:], strength=2)
+    patterns = []
+    
+    if len(sh_idx) >= 3:
+        highs = [float(df["High"].iloc[i]) for i in sh_idx[-5:]]
+        # Double Top: dua high hampir sama
+        if len(highs) >= 2 and abs(highs[-1] - highs[-2]) < 1.5:
+            patterns.append("🔺 Double Top (potensi bearish)")
+        # Head & Shoulders (sederhana): high tengah lebih tinggi dari kiri/kanan
+        if len(highs) >= 3 and highs[-2] > highs[-1] and highs[-2] > highs[-3]:
+            patterns.append("🔺 Head & Shoulders (bearish)")
+    
+    if len(sl_idx) >= 3:
+        lows = [float(df["Low"].iloc[i]) for i in sl_idx[-5:]]
+        # Double Bottom: dua low hampir sama
+        if len(lows) >= 2 and abs(lows[-1] - lows[-2]) < 1.5:
+            patterns.append("🔻 Double Bottom (potensi bullish)")
+        # Inverse Head & Shoulders
+        if len(lows) >= 3 and lows[-2] < lows[-1] and lows[-2] < lows[-3]:
+            patterns.append("🔻 Inverse H&S (bullish)")
+    
+    # Bullish/Bearish Flag sederhana (konsolidasi setelah move)
+    if len(df) >= 10:
+        range_20 = (df["High"].iloc[-10:] - df["Low"].iloc[-10:]).mean()
+        range_50 = (df["High"].iloc[-50:] - df["Low"].iloc[-50:]).mean()
+        if range_20 < range_50 * 0.6:
+            # Konsolidasi
+            last_close = df["Close"].iloc[-1]
+            if last_close > df["Close"].iloc[-5]:
+                patterns.append("🏁 Bullish Flag (breakout potential)")
+            else:
+                patterns.append("🏁 Bearish Flag (breakdown potential)")
+    
+    if not patterns:
+        patterns.append("📊 Tidak ada pola chart signifikan")
+    
+    return patterns
+
+# ==================== QM LEVEL (Quantitative Model Level) ====================
+def calculate_qm_levels(df, atr_mult=2.0):
+    """
+    QM Level: level-level berdasarkan ATR dan volume-weighted average
+    """
+    if df is None or df.empty or len(df) < 20:
+        return []
+    
+    price = float(df["Close"].iloc[-1])
+    atr = float((df["High"] - df["Low"]).rolling(14).mean().iloc[-1])
+    if pd.isna(atr) or atr <= 0:
+        atr = price * 0.001
+    
+    # Volume Weighted Average Price (VWAP sederhana)
+    vwap = (df["Close"] * df["Volume"]).sum() / df["Volume"].sum() if "Volume" in df.columns else price
+    
+    levels = []
+    # QM Level 1: ATR-based support/resistance
+    levels.append({"level": round(price + atr * 0.5, 2), "type": "QM R1", "desc": "Resistance 0.5 ATR"})
+    levels.append({"level": round(price - atr * 0.5, 2), "type": "QM S1", "desc": "Support 0.5 ATR"})
+    levels.append({"level": round(price + atr * 1.0, 2), "type": "QM R2", "desc": "Resistance 1.0 ATR"})
+    levels.append({"level": round(price - atr * 1.0, 2), "type": "QM S2", "desc": "Support 1.0 ATR"})
+    levels.append({"level": round(price + atr * 1.5, 2), "type": "QM R3", "desc": "Resistance 1.5 ATR"})
+    levels.append({"level": round(price - atr * 1.5, 2), "type": "QM S3", "desc": "Support 1.5 ATR"})
+    
+    # VWAP level
+    levels.append({"level": round(vwap, 2), "type": "QM VWAP", "desc": "Volume Weighted Average Price"})
+    
+    return levels
+
+# ==================== DESKRIPSI TEKNIKAL DAILY ====================
+def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premium_status, patterns, qm_levels):
+    if df is None or df.empty:
+        return "Data harian tidak tersedia."
+    
+    last = df.iloc[-1]
+    sh, sl = find_swings(df, 2)
+    bull, bear = detect_bos(df, sh, sl)
+    bias = "BULLISH" if bull else ("BEARISH" if bear else "NEUTRAL")
+    
+    ema20 = df["Close"].rolling(20).mean().iloc[-1]
+    above_ema = price > ema20
+    cisd = detect_cisd(df)
+    
+    desc = f"**Kondisi Harian ({bias}):** "
+    
+    if bias == "BULLISH":
+        desc += "Market menunjukkan struktur Higher High dan Higher Low (uptrend). "
+        desc += "Harga " + ("di atas" if above_ema else "di bawah") + " EMA 20. "
+    elif bias == "BEARISH":
+        desc += "Market menunjukkan struktur Lower High dan Lower Low (downtrend). "
+        desc += "Harga " + ("di atas" if above_ema else "di bawah") + " EMA 20. "
+    else:
+        desc += "Market dalam fase konsolidasi (range). "
+    
+    if cisd == "BULLISH_CISD":
+        desc += "**CISD Bullish terdeteksi** (potensi pembalikan ke atas). "
+    elif cisd == "BEARISH_CISD":
+        desc += "**CISD Bearish terdeteksi** (potensi pembalikan ke bawah). "
+    
+    # Pivot
+    if pivot_data:
+        pivot, r1, r2, r3, s1, s2, s3 = pivot_data
+        desc += f"Pivot: {pivot:.2f} | R1:{r1:.2f} R2:{r2:.2f} R3:{r3:.2f} | S1:{s1:.2f} S2:{s2:.2f} S3:{s3:.2f}. "
+    
+    # EQH/EQL
+    if eqh:
+        desc += f"EQH terdeteksi di {', '.join([str(e) for e in eqh[:3]])}. "
+    if eql:
+        desc += f"EQL terdeteksi di {', '.join([str(e) for e in eql[:3]])}. "
+    
+    # Premium/Discount
+    desc += f"Status: {premium_status}. "
+    
+    # Pattern
+    if patterns:
+        desc += f"Pattern: {', '.join(patterns[:2])}. "
+    
+    # QM Level terdekat
+    if qm_levels:
+        nearest_qm = min(qm_levels, key=lambda x: abs(x["level"] - price))
+        desc += f"QM terdekat: {nearest_qm['type']} @ {nearest_qm['level']:.2f}. "
+    
+    desc += f"ATR: {round((df['High'] - df['Low']).rolling(14).mean().iloc[-1], 2)}."
+    
+    return desc
+
+# ==================== SIGNAL GENERATOR ====================
+def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
-        return None, None, "Data tidak lengkap.", [], [], None, None
+        return None, None, None, None, None, None, None, None, None, None, "Data tidak lengkap."
 
     daily_df = dfs.get("1d")
     if daily_df is None or daily_df.empty or len(daily_df) < 10:
-        return None, None, "Data daily tidak cukup.", [], [], None, None
-
+        return None, None, None, None, None, None, None, None, None, None, "Data daily tidak cukup."
+    
     sh_d, sl_d = find_swings(daily_df, 2)
     bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
     bias = "BUY" if bull_bias else ("SELL" if bear_bias else "NEUTRAL")
-    
+
     htf_df = dfs.get("4h")
     if htf_df is None or htf_df.empty:
         htf_df = daily_df
-    bsl, ssl = find_liquidity(htf_df, strength=2)
-    bsl = round(bsl, 2) if bsl else None
-    ssl = round(ssl, 2) if ssl else None
+    sh_htf, sl_htf = find_swings(htf_df, 2)
+    bsl = float(htf_df["High"].iloc[sh_htf[-1]]) if len(sh_htf) >= 1 else None
+    ssl = float(htf_df["Low"].iloc[sl_htf[-1]]) if len(sl_htf) >= 1 else None
 
-    # Tentukan Timeframe berdasarkan mode
+    # === PIVOT ===
+    pivot_data = calculate_pivots(daily_df)
+    
+    # === EQH/EQL ===
+    eqh, eql = detect_eqh_eql(htf_df if len(htf_df) > 20 else daily_df, strength=2, tolerance=1.0)
+    
+    # === PREMIUM/DISCOUNT ===
+    range_high = float(daily_df["High"].iloc[-5:].max())
+    range_low = float(daily_df["Low"].iloc[-5:].min())
+    
     if mode == "Scalping":
-        zone_tf = "5m"
-        entry_tf = "1m" if "1m" in dfs else "5m"
-        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.0, 1.0, 1.5, 2.0
-        max_distance_mult = 3.0
-    else:  # Intraday
-        zone_tf = "1h"
-        entry_tf = "15m"
-        sl_mult, tp1_mult, tp2_mult, tp3_mult = 1.5, 1.5, 2.0, 3.0
-        max_distance_mult = 5.0
+        zone_tf = "5m"; entry_tf = "5m"
+        sl_mult = 1.0; max_dist = 3.0
+    else:
+        zone_tf = "1h"; entry_tf = "15m"
+        sl_mult = 1.5; max_dist = 5.0
 
     zone_df = dfs.get(zone_tf)
     if zone_df is None or zone_df.empty:
-        if "1h" in dfs:
-            zone_df = dfs["1h"]
-        elif "15m" in dfs:
-            zone_df = dfs["15m"]
-        else:
-            return None, None, f"Data zona ({zone_tf}) tidak tersedia.", [], [], bsl, ssl
-    if len(zone_df) < 10:
-        return None, None, f"Data zona ({zone_tf}) tidak cukup.", [], [], bsl, ssl
+        zone_df = dfs.get("1h")
+    if zone_df is None or zone_df.empty or len(zone_df) < 10:
+        return None, None, None, None, None, None, None, None, None, None, f"Data zona ({zone_tf}) tidak cukup."
 
+    entry_df = dfs.get(entry_tf)
+    if entry_df is None or entry_df.empty:
+        entry_df = zone_df
+    price = float(entry_df["Close"].iloc[-1])
+    atr = float((entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1])
+    if pd.isna(atr) or atr <= 0:
+        atr = price * 0.001
+
+    # === PREMIUM/DISCOUNT ===
+    premium_pct, premium_status, equilibrium = calculate_premium_discount(price, range_high, range_low)
+    
+    # === CHART PATTERN ===
+    patterns = detect_chart_patterns(zone_df if len(zone_df) > 20 else entry_df, strength=2)
+    
+    # === QM LEVELS ===
+    qm_levels = calculate_qm_levels(entry_df if len(entry_df) > 20 else zone_df, atr_mult=1.5)
+
+    # === SWING LEVELS ===
+    nearest_highs, nearest_lows = get_swing_levels(entry_df if entry_tf in dfs else zone_df, n=3)
+    if len(nearest_highs) < 2:
+        nearest_highs = nearest_highs + [bsl] if bsl else nearest_highs
+    if len(nearest_lows) < 2:
+        nearest_lows = nearest_lows + [ssl] if ssl else nearest_lows
+
+    # === ORDER BLOCK ===
     sh_z, sl_z = find_swings(zone_df, 2)
     supply_zones, demand_zones = [], []
     for idx in sh_z[-8:]:
@@ -292,7 +511,6 @@ def generate_dual_signals(symbol="XAUUSD", mode="Intraday"):
         ob = find_ob(zone_df, "bull", idx)
         if ob:
             demand_zones.append(ob)
-    
     fvg = find_fvg(zone_df)
     if fvg:
         if fvg["type"] == "bearish":
@@ -300,84 +518,109 @@ def generate_dual_signals(symbol="XAUUSD", mode="Intraday"):
         elif fvg["type"] == "bullish":
             demand_zones.append({"high": fvg["top"], "low": fvg["bottom"]})
 
-    entry_df = dfs.get(entry_tf)
-    if entry_df is None or entry_df.empty:
-        entry_df = zone_df
-    if entry_df is not None and not entry_df.empty:
-        price = entry_df["Close"].iloc[-1]
-        atr = (entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1]
-        if pd.isna(atr) or atr <= 0:
-            atr = price * 0.001
-    else:
-        price = 2650
-        atr = 5.0
-
     best_supply, best_demand = None, None
-    valid_supplies, valid_demands = [], []
-    for zone in supply_zones:
-        if zone["high"] > price:
-            dist = zone["high"] - price
-            if dist < max_distance_mult * atr:
-                valid_supplies.append({"zone": zone, "dist": dist})
-    if valid_supplies:
-        valid_supplies.sort(key=lambda x: x["dist"])
-        best_supply = valid_supplies[0]["zone"]
+    for z in supply_zones:
+        if z["high"] > price and (z["high"] - price) < max_dist * atr:
+            if best_supply is None or z["high"] < best_supply["high"]:
+                best_supply = z
+    for z in demand_zones:
+        if z["low"] < price and (price - z["low"]) < max_dist * atr:
+            if best_demand is None or z["low"] > best_demand["low"]:
+                best_demand = z
 
-    for zone in demand_zones:
-        if zone["low"] < price:
-            dist = price - zone["low"]
-            if dist < max_distance_mult * atr:
-                valid_demands.append({"zone": zone, "dist": dist})
-    if valid_demands:
-        valid_demands.sort(key=lambda x: x["dist"])
-        best_demand = valid_demands[0]["zone"]
+    def build_order(order_type, direction, entry, sl, tp1, tp2, tp3, reason, zone_info="", risk_label="SAFE"):
+        return {
+            "type": order_type, "direction": direction,
+            "entry": round(entry, 2), "sl": round(sl, 2),
+            "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2),
+            "reason": reason, "zone_info": zone_info, "risk_label": risk_label
+        }
 
-    def calc_signal(direction, zone, price, atr, bsl, ssl):
-        if direction == "SELL":
-            entry = zone["high"]
-            sl = entry + (atr * sl_mult)
-            if ssl and ssl < entry:
-                tp1 = ssl
-            else:
-                tp1 = entry - (atr * tp1_mult)
-            tp2 = entry - (atr * tp2_mult)
-            tp3 = entry - (atr * tp3_mult)
-            tp4 = "Open"
-        else:
-            entry = zone["low"]
-            sl = entry - (atr * sl_mult)
-            if bsl and bsl > entry:
-                tp1 = bsl
-            else:
-                tp1 = entry + (atr * tp1_mult)
-            tp2 = entry + (atr * tp2_mult)
-            tp3 = entry + (atr * tp3_mult)
-            tp4 = "Open"
-        return round(entry, 2), round(sl, 2), round(tp1, 2), round(tp2, 2), round(tp3, 2), tp4
+    orders = {"buy_limit": None, "sell_limit": None, "buy_stop": None, "sell_stop": None}
+    risk_labels = {}
 
-    sell_signal, buy_signal = None, None
+    # --- SELL LIMIT ---
     if best_supply:
-        entry, sl, tp1, tp2, tp3, tp4 = calc_signal("SELL", best_supply, price, atr, bsl, ssl)
-        sell_signal = {
-            "direction": "SELL", "entry": entry, "sl": sl,
-            "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4,
-            "zone_high": round(best_supply["high"], 2), "zone_low": round(best_supply["low"], 2),
-            "bsl": bsl, "ssl": ssl,
-            "reason": f"Supply OB ({zone_tf}) di {best_supply['high']:.2f}-{best_supply['low']:.2f}",
-            "status": "pending", "tf": zone_tf
-        }
-    if best_demand:
-        entry, sl, tp1, tp2, tp3, tp4 = calc_signal("BUY", best_demand, price, atr, bsl, ssl)
-        buy_signal = {
-            "direction": "BUY", "entry": entry, "sl": sl,
-            "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp4": tp4,
-            "zone_high": round(best_demand["high"], 2), "zone_low": round(best_demand["low"], 2),
-            "bsl": bsl, "ssl": ssl,
-            "reason": f"Demand OB ({zone_tf}) di {best_demand['high']:.2f}-{best_demand['low']:.2f}",
-            "status": "pending", "tf": zone_tf
-        }
+        entry = best_supply["high"]
+        sl = entry + (atr * sl_mult)
+        tp1 = nearest_lows[0] if nearest_lows else ssl if ssl else entry - atr
+        tp2 = nearest_lows[1] if len(nearest_lows) > 1 else ssl if ssl else entry - atr*2
+        tp3 = ssl if ssl else entry - atr*3
+        risk = "SAFE" if best_supply and cisd == "BEARISH_CISD" else "HIGH RISK (Need Confirmation)"
+        orders["sell_limit"] = build_order(
+            "LIMIT", "SELL", entry, sl, tp1, tp2, tp3,
+            f"Sell Limit di Supply OB ({best_supply['low']:.2f}-{best_supply['high']:.2f})",
+            f"OB: {best_supply['low']:.2f}-{best_supply['high']:.2f}", risk
+        )
 
-    return sell_signal, buy_signal, bias, supply_zones, demand_zones, bsl, ssl
+    # --- BUY LIMIT ---
+    if best_demand:
+        entry = best_demand["low"]
+        sl = entry - (atr * sl_mult)
+        tp1 = nearest_highs[0] if nearest_highs else bsl if bsl else entry + atr
+        tp2 = nearest_highs[1] if len(nearest_highs) > 1 else bsl if bsl else entry + atr*2
+        tp3 = bsl if bsl else entry + atr*3
+        risk = "SAFE" if best_demand and cisd == "BULLISH_CISD" else "HIGH RISK (Need Confirmation)"
+        orders["buy_limit"] = build_order(
+            "LIMIT", "BUY", entry, sl, tp1, tp2, tp3,
+            f"Buy Limit di Demand OB ({best_demand['low']:.2f}-{best_demand['high']:.2f})",
+            f"OB: {best_demand['low']:.2f}-{best_demand['high']:.2f}", risk
+        )
+
+    # --- SELL STOP ---
+    if nearest_lows:
+        entry = nearest_lows[0] - (atr * 0.5)
+        sl = nearest_lows[0] + (atr * 1.0)
+        tp1 = nearest_lows[1] if len(nearest_lows) > 1 else ssl
+        tp2 = nearest_lows[2] if len(nearest_lows) > 2 else ssl
+        tp3 = ssl if ssl else entry - atr*2
+        risk = "HIGH RISK (Breakout Need Confirmation)"
+        orders["sell_stop"] = build_order(
+            "STOP", "SELL", entry, sl, tp1, tp2, tp3,
+            f"Sell Stop di bawah Swing Low {nearest_lows[0]:.2f} (Breakout)",
+            "", risk
+        )
+
+    # --- BUY STOP ---
+    if nearest_highs:
+        entry = nearest_highs[0] + (atr * 0.5)
+        sl = nearest_highs[0] - (atr * 1.0)
+        tp1 = nearest_highs[1] if len(nearest_highs) > 1 else bsl
+        tp2 = nearest_highs[2] if len(nearest_highs) > 2 else bsl
+        tp3 = bsl if bsl else entry + atr*2
+        risk = "HIGH RISK (Breakout Need Confirmation)"
+        orders["buy_stop"] = build_order(
+            "STOP", "BUY", entry, sl, tp1, tp2, tp3,
+            f"Buy Stop di atas Swing High {nearest_highs[0]:.2f} (Breakout)",
+            "", risk
+        )
+
+    # === CONFIDENCE SCORE ===
+    sell_score, buy_score = 50, 50
+    if bias == "SELL": sell_score += 20
+    elif bias == "BUY": buy_score += 20
+    cisd = detect_cisd(entry_df)
+    if cisd == "BEARISH_CISD": sell_score += 15
+    elif cisd == "BULLISH_CISD": buy_score += 15
+    if orders["sell_limit"] is not None: sell_score += 15
+    if orders["buy_limit"] is not None: buy_score += 15
+    if nearest_lows and (price - nearest_lows[0]) < atr * 2: sell_score += 10
+    if nearest_highs and (nearest_highs[0] - price) < atr * 2: buy_score += 10
+
+    total = sell_score + buy_score
+    sell_pct = round((sell_score / total) * 100)
+    buy_pct = 100 - sell_pct
+
+    if sell_pct >= 65:
+        rec_direction = "SELL"; rec_label = "RECOMMENDED" if sell_pct >= 75 else "HIGH RISK"
+    elif buy_pct >= 65:
+        rec_direction = "BUY"; rec_label = "RECOMMENDED" if buy_pct >= 75 else "HIGH RISK"
+    else:
+        rec_direction = "NEUTRAL"; rec_label = "WAIT & SEE"
+
+    confidence = {"sell": sell_pct, "buy": buy_pct, "direction": rec_direction, "label": rec_label}
+
+    return orders, bsl, ssl, bias, nearest_highs, nearest_lows, confidence, pivot_data, eqh, eql, premium_status, patterns, qm_levels, equilibrium, premium_pct
 
 # ==================== SESSION STATE ====================
 if "logged_in" not in st.session_state:
@@ -387,42 +630,48 @@ if "logged_in" not in st.session_state:
     st.session_state.mode = "Intraday"
     st.session_state.triggered_orders = []
     st.session_state.trigger_counter = 0
+    st.session_state.saved_user = ""
+    st.session_state.saved_pass = ""
 
-st.set_page_config(page_title="XAUUSD - Alu Trading System", page_icon="🥇", layout="wide")
+st.set_page_config(page_title="XAUUSD - Alu System", page_icon="🥇", layout="wide")
 init_db()
 
 # ==================== CSS ====================
 st.markdown("""
 <style>
     .stApp { background: #0E1117; }
-    .sell-card { background: linear-gradient(145deg, #2a0f0f, #1a0808); border: 2px solid #ff4444; border-radius: 20px; padding: 18px; margin: 15px 0; color: #fff; box-shadow: 0 4px 15px rgba(255,68,68,0.2); }
-    .buy-card { background: linear-gradient(145deg, #0f2a1a, #08180d); border: 2px solid #00ff88; border-radius: 20px; padding: 18px; margin: 15px 0; color: #fff; box-shadow: 0 4px 15px rgba(0,255,136,0.2); }
+    .sell-card { background: linear-gradient(145deg, #2a0f0f, #1a0808); border: 2px solid #ff4444; border-radius: 20px; padding: 18px; margin: 10px 0; color: #fff; box-shadow: 0 4px 15px rgba(255,68,68,0.2); }
+    .buy-card { background: linear-gradient(145deg, #0f2a1a, #08180d); border: 2px solid #00ff88; border-radius: 20px; padding: 18px; margin: 10px 0; color: #fff; box-shadow: 0 4px 15px rgba(0,255,136,0.2); }
+    .conf-card { background: #1a1a2e; border: 2px solid #ffaa00; border-radius: 20px; padding: 15px 20px; margin: 10px 0; color: #fff; }
+    .desc-box { background: #1a1a2e; border-radius: 16px; padding: 15px; margin: 10px 0; border-left: 4px solid #FFD700; color: #ccc; font-size: 0.95rem; line-height: 1.6; }
     .signal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
-    .signal-title { font-size: 1.4rem; font-weight: bold; margin: 0; }
-    .signal-price { font-size: 1.6rem; font-weight: bold; background: rgba(0,0,0,0.4); padding: 2px 16px; border-radius: 30px; font-family: monospace; }
+    .signal-title { font-size: 1.2rem; font-weight: bold; margin: 0; }
+    .signal-price { font-size: 1.4rem; font-weight: bold; background: rgba(0,0,0,0.4); padding: 2px 16px; border-radius: 30px; font-family: monospace; }
     .chip-container { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
-    .chip { background: rgba(20, 25, 40, 0.8); padding: 4px 14px; border-radius: 30px; font-size: 0.9rem; border: 1px solid #2a3240; white-space: nowrap; }
+    .chip { background: rgba(20, 25, 40, 0.8); padding: 4px 14px; border-radius: 30px; font-size: 0.85rem; border: 1px solid #2a3240; white-space: nowrap; }
     .chip-sl { color: #ff6666; border-color: #ff4444; }
     .chip-tp { color: #66ff88; border-color: #00ff8855; }
+    .chip-tp1 { color: #ffaa00; border-color: #ffaa00; }
+    .risk-safe { background: #00ff8822; border: 1px solid #00ff88; color: #00ff88; padding: 2px 12px; border-radius: 30px; font-size: 0.75rem; }
+    .risk-high { background: #ff444422; border: 1px solid #ff4444; color: #ff4444; padding: 2px 12px; border-radius: 30px; font-size: 0.75rem; }
+    .risk-wait { background: #ffaa0022; border: 1px solid #ffaa00; color: #ffaa00; padding: 2px 12px; border-radius: 30px; font-size: 0.75rem; }
+    .zone-footer { font-size: 0.75rem; color: #aaa; margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a3240; }
     .liquidity-badge { background: #ffaa0022; border: 1px solid #ffaa00; border-radius: 12px; padding: 4px 12px; font-size: 0.8rem; color: #ffaa00; }
-    .zone-footer { font-size: 0.8rem; color: #aaa; margin-top: 12px; padding-top: 10px; border-top: 1px solid #2a3240; }
-    .running-card { background: #1a1a2e; border: 2px solid #ffaa00; border-radius: 20px; padding: 20px; margin: 10px 0; color: #fff; box-shadow: 0 0 20px rgba(255,170,0,0.1); }
-    .order-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; }
-    .order-item { background: #0E1117; padding: 8px 12px; border-radius: 8px; text-align: center; border: 1px solid #2a3240; }
-    .order-item .label { font-size: 0.7rem; color: #888; text-transform: uppercase; }
-    .order-item .value { font-weight: bold; font-family: monospace; font-size: 1.1rem; }
     .bias-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; background: #2a3240; color: #ccc; }
     .bias-buy { background: #00ff8822; border: 1px solid #00ff88; color: #00ff88; }
     .bias-sell { background: #ff444422; border: 1px solid #ff4444; color: #ff4444; }
     .bias-neutral { background: #ffaa0022; border: 1px solid #ffaa00; color: #ffaa00; }
     .header-title { font-size: 2.5rem; font-weight: bold; color: #FFD700; margin-bottom: 0; }
-    .header-sub { color: #888; font-size: 0.9rem; }
-    .ohlc-box { background: #1a1a2e; border-radius: 12px; padding: 10px 18px; display: inline-block; margin-right: 10px; border: 1px solid #2a3240; }
-    .ohlc-label { color: #888; font-size: 0.7rem; text-transform: uppercase; }
-    .ohlc-value { font-weight: bold; font-family: monospace; font-size: 1.1rem; }
-    .mode-btn { padding: 12px 30px; border-radius: 30px; font-weight: bold; border: 2px solid #2a3240; background: transparent; color: #ccc; cursor: pointer; transition: 0.3s; }
-    .mode-btn.active { border-color: #00ff88; background: #00ff8822; color: #00ff88; }
+    .ohlc-box { background: #1a1a2e; border-radius: 12px; padding: 8px 14px; display: inline-block; margin-right: 8px; border: 1px solid #2a3240; }
+    .ohlc-label { color: #888; font-size: 0.6rem; text-transform: uppercase; }
+    .ohlc-value { font-weight: bold; font-family: monospace; font-size: 1rem; }
+    .order-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .sub-card { background: rgba(0,0,0,0.3); border-radius: 12px; padding: 12px; margin-top: 8px; border: 1px solid #2a3240; }
     .footer { text-align: center; color: #555; padding: 20px 0; font-size: 0.8rem; border-top: 1px solid #1a1a2a; margin-top: 30px; }
+    .tech-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 10px 0; }
+    .tech-item { background: #1a1a2e; border-radius: 12px; padding: 10px 14px; border: 1px solid #2a3240; text-align: center; }
+    .tech-item .label { color: #888; font-size: 0.7rem; text-transform: uppercase; }
+    .tech-item .value { font-weight: bold; font-size: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -430,28 +679,38 @@ st.markdown("""
 if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.markdown("<br><br><h1 style='text-align:center;color:#FFD700;'>🥇 XAUUSD TRADING SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>Framework Likuiditas + CISD + Order Block</p><br>", unsafe_allow_html=True)
+        st.markdown("<br><br><h1 style='text-align:center;color:#FFD700;'>🥇 XAUUSD SYSTEM</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>Limit/Stop + Teknikal Lengkap</p><br>", unsafe_allow_html=True)
         role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
+        u = st.text_input("Username", value=st.session_state.saved_user)
+        p = st.text_input("Password", type="password", value=st.session_state.saved_pass)
+        remember = st.checkbox("🔐 Ingat saya", value=bool(st.session_state.saved_user))
         if st.button("🔓 MASUK", use_container_width=True):
+            success = False
             if role == "Admin":
                 if verify_admin(u, p):
                     st.session_state.logged_in = True
                     st.session_state.role = "admin"
-                    st.rerun()
+                    success = True
                 else:
-                    st.error("❌ Username/password admin salah")
+                    st.error("❌ Admin salah")
             else:
                 nama, err = verify_user(u, p)
                 if nama:
                     st.session_state.logged_in = True
                     st.session_state.role = "user"
                     st.session_state.nama = nama
-                    st.rerun()
+                    success = True
                 else:
                     st.error(f"❌ {err}")
+            if success:
+                if remember:
+                    st.session_state.saved_user = u
+                    st.session_state.saved_pass = p
+                else:
+                    st.session_state.saved_user = ""
+                    st.session_state.saved_pass = ""
+                st.rerun()
 
 # ==================== ADMIN ====================
 elif st.session_state.role == "admin":
@@ -459,64 +718,50 @@ elif st.session_state.role == "admin":
     if st.sidebar.button("🚪 LOGOUT"):
         st.session_state.logged_in = False
         st.rerun()
-    st.title("👑 Admin Panel - Alu Trading System")
-    tabs = st.tabs(["➕ Generate Kode", "🎁 Trial 2 Hari", "📋 Daftar User", "⚙️ Ganti Password"])
+    st.title("Admin Panel")
+    tabs = st.tabs(["➕ Generate", "🎁 Trial", "📋 Users", "⚙️ Password"])
     with tabs[0]:
-        st.subheader("Generate Kode Berbayar")
         c1, c2 = st.columns(2)
         nama = c1.text_input("Nama")
         email = c2.text_input("Email")
-        masa = st.selectbox("Masa Aktif", [2,7,30,90,180,365], format_func=lambda x: f"{x} Hari")
-        if st.button("🔑 GENERATE", use_container_width=True):
+        masa = st.selectbox("Masa", [2,7,30,90,180,365], format_func=lambda x: f"{x} Hari")
+        if st.button("🔑 GENERATE"):
             if nama and email:
                 user, pw, exp = generate_user(nama, email, masa)
-                st.success("✅ Berhasil!")
                 st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
-            else:
-                st.error("Isi nama & email")
     with tabs[1]:
-        st.subheader("Trial 2 Hari")
         c1, c2 = st.columns(2)
         nama = c1.text_input("Nama", key="tn")
         email = c2.text_input("Email", key="te")
-        if st.button("🎁 GENERATE TRIAL", use_container_width=True):
+        if st.button("🎁 TRIAL"):
             if nama and email:
                 user, pw, exp = generate_user(nama, email, 2, is_trial=1)
-                st.success("✅ Trial dibuat!")
                 st.code(f"Username: {user}\nPassword: {pw}\nExpired: {exp}")
-            else:
-                st.error("Isi nama & email")
     with tabs[2]:
-        st.subheader("Daftar User")
         for u in get_users():
             uid, nama, email, uname, exp, status, trial = u
-            label = "🎁 TRIAL" if trial else "💰 BAYAR"
-            emoji = "🟢" if status=="aktif" else "🔴"
-            with st.expander(f"{emoji} [{label}] {nama} - {uname}"):
+            with st.expander(f"{nama} - {uname}"):
                 st.write(f"Email: {email}\nExpired: {exp}")
                 c1, c2 = st.columns(2)
                 d = c1.number_input("Hari",1,365,30,key=f"ex{uid}")
                 if c1.button("Perpanjang", key=f"eb{uid}"):
-                    extend_user(uid, d)
-                    st.rerun()
+                    extend_user(uid, d); st.rerun()
                 if c2.button("Hapus", key=f"db{uid}"):
-                    delete_user(uid)
-                    st.rerun()
+                    delete_user(uid); st.rerun()
     with tabs[3]:
-        st.subheader("Ganti Password Admin")
-        old_pw = st.text_input("Password Lama", type="password")
-        new_pw = st.text_input("Password Baru", type="password")
-        if st.button("💾 Simpan Password Baru"):
-            if change_admin_password(old_pw, new_pw):
-                st.success("✅ Password admin berhasil diubah!")
+        old = st.text_input("Password Lama", type="password")
+        new = st.text_input("Password Baru", type="password")
+        if st.button("💾 Ganti"):
+            if change_admin_password(old, new):
+                st.success("✅ Berhasil diubah!")
             else:
                 st.error("❌ Password lama salah")
 
-# ==================== USER DASHBOARD (FOKUS XAUUSD) ====================
+# ==================== USER DASHBOARD ====================
 else:
     # --- SIDEBAR ---
     with st.sidebar:
-        st.markdown(f"<h3 style='color:#FFD700; margin-bottom:0;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='color:#FFD700;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
         components.html("""
         <div id="live-clock" style="color:#cccccc; font-size:15px; margin:5px 0 15px 0;"></div>
         <script>
@@ -532,8 +777,7 @@ else:
             else session = "New York (Late)";
             document.getElementById('live-clock').innerHTML = "🕒 " + timeString + " WIB<br>🇯🇵 " + session;
         }
-        updateClock();
-        setInterval(updateClock, 1000);
+        updateClock(); setInterval(updateClock, 1000);
         </script>
         """, height=65)
         conn = get_conn()
@@ -544,117 +788,128 @@ else:
         if row:
             exp = datetime.strptime(row[0], "%Y-%m-%d")
             sisa = (exp - datetime.now()).days
-            if sisa < 0: sisa = 0
-            status_text = f"🎁 Trial {sisa} hari" if row[1] else f"⏳ {sisa} hari tersisa"
-            st.info(status_text)
+            st.info(f"🎁 Trial {sisa} hari" if row[1] else f"⏳ {sisa} hari")
         st.markdown("---")
-        st.markdown("### ⚙️ Kontrol")
         if st.button("🚪 LOGOUT", use_container_width=True):
             st.session_state.logged_in = False
             st.rerun()
-        if st.button("🗑️ Clear Orders", use_container_width=True, key="clear_sidebar"):
+        if st.button("🗑️ Clear Orders", use_container_width=True):
             st.session_state.triggered_orders = []
             st.rerun()
 
-    # --- HEADER XAUUSD + OHLC + BIAS ---
-    # Ambil data daily terbaru
+    # --- FETCH DATA ---
     daily_df = fetch_data("XAUUSD", "1d", "5d")
     if daily_df is not None and not daily_df.empty:
         last = daily_df.iloc[-1]
-        ohlc = {
-            "Open": round(last["Open"], 2),
-            "High": round(last["High"], 2),
-            "Low": round(last["Low"], 2),
-            "Close": round(last["Close"], 2)
-        }
-        # Hitung bias dari daily
+        ohlc = {"Open": round(last["Open"], 2), "High": round(last["High"], 2), 
+                "Low": round(last["Low"], 2), "Close": round(last["Close"], 2)}
         sh_d, sl_d = find_swings(daily_df, 2)
         bull, bear = detect_bos(daily_df, sh_d, sl_d)
         bias = "BUY" if bull else ("SELL" if bear else "NEUTRAL")
         bias_color = "bias-buy" if bias == "BUY" else ("bias-sell" if bias == "SELL" else "bias-neutral")
     else:
-        ohlc = {"Open": 0, "High": 0, "Low": 0, "Close": 0}
-        bias = "NEUTRAL"
-        bias_color = "bias-neutral"
+        ohlc = {"Open": 0, "High": 0, "Low": 0, "Close": 0}; bias = "NEUTRAL"; bias_color = "bias-neutral"
 
-    col_head1, col_head2, col_head3 = st.columns([2, 2, 1])
-    with col_head1:
+    # --- GENERATE SIGNAL ---
+    orders, bsl, ssl, bias, near_highs, near_lows, conf, pivot_data, eqh, eql, premium_status, patterns, qm_levels, equilibrium, premium_pct = generate_all_signals("XAUUSD", mode=st.session_state.mode)
+
+    # Harga spot
+    try:
+        df_spot = yf.download("GC=F", period="1d", interval="1m")
+        spot = float(df_spot["Close"].iloc[-1]) if not df_spot.empty else ohlc["Close"]
+    except:
+        spot = ohlc["Close"]
+
+    # --- HEADER + OHLC ---
+    col_h1, col_h2 = st.columns([2, 1])
+    with col_h1:
         st.markdown("<h1 class='header-title'>🥇 XAUUSD</h1>", unsafe_allow_html=True)
-        st.markdown(f"<span class='header-sub'>Daily Bias: <span class='bias-badge {bias_color}'>{bias}</span></span>", unsafe_allow_html=True)
-    with col_head2:
+        st.markdown(f"<span>Daily Bias: <span class='bias-badge {bias_color}'>{bias}</span></span>", unsafe_allow_html=True)
+    with col_h2:
         st.markdown(f"""
-        <div style='display:flex; flex-wrap:wrap; gap:8px;'>
+        <div style='display:flex; flex-wrap:wrap; gap:5px; justify-content:flex-end;'>
             <div class='ohlc-box'><span class='ohlc-label'>Open</span><br><span class='ohlc-value'>{ohlc['Open']}</span></div>
             <div class='ohlc-box'><span class='ohlc-label'>High</span><br><span class='ohlc-value' style='color:#00ff88;'>{ohlc['High']}</span></div>
             <div class='ohlc-box'><span class='ohlc-label'>Low</span><br><span class='ohlc-value' style='color:#ff4444;'>{ohlc['Low']}</span></div>
             <div class='ohlc-box'><span class='ohlc-label'>Close</span><br><span class='ohlc-value'>{ohlc['Close']}</span></div>
-        </div>
-        """, unsafe_allow_html=True)
-    with col_head3:
-        # Tampilkan harga spot terbaru
-        try:
-            df_spot = yf.download("GC=F", period="1d", interval="1m")
-            if not df_spot.empty:
-                spot = float(df_spot["Close"].iloc[-1])
-                st.metric(label="💵 Spot", value=f"{spot:.2f}", delta=None)
-        except:
-            pass
+        </div>""", unsafe_allow_html=True)
 
-    # --- KEY LEVEL (BSL/SSL) ---
-    htf_df = fetch_data("XAUUSD", "4h", "5d")
-    if htf_df is not None and not htf_df.empty:
-        bsl, ssl = find_liquidity(htf_df, strength=2)
-        bsl = round(bsl, 2) if bsl else "-"
-        ssl = round(ssl, 2) if ssl else "-"
-    else:
-        bsl, ssl = "-", "-"
+    # --- TEKNIKAL GRID (Pivot, EQH/EQL, Premium, Pattern, QM) ---
+    pivot, r1, r2, r3, s1, s2, s3 = pivot_data if pivot_data else (0,0,0,0,0,0,0)
+    eqh_str = ", ".join([str(e) for e in eqh[:3]]) if eqh else "-"
+    eql_str = ", ".join([str(e) for e in eql[:3]]) if eql else "-"
+    pattern_str = patterns[0] if patterns else "-"
+    qm_str = min(qm_levels, key=lambda x: abs(x["level"] - spot)) if qm_levels else None
+    qm_display = f"{qm_str['type']} @ {qm_str['level']}" if qm_str else "-"
+
+    st.markdown("""
+    <div class='tech-grid'>
+        <div class='tech-item'><span class='label'>Pivot</span><br><span class='value'>{}</span></div>
+        <div class='tech-item'><span class='label'>R1/R2/R3</span><br><span class='value'>{}/{}/{}</span></div>
+        <div class='tech-item'><span class='label'>S1/S2/S3</span><br><span class='value'>{}/{}/{}</span></div>
+        <div class='tech-item'><span class='label'>EQH / EQL</span><br><span class='value'>{}/<br>{}</span></div>
+        <div class='tech-item'><span class='label'>Premium/Discount</span><br><span class='value' style='color:#ffaa00;'>{}</span></div>
+        <div class='tech-item'><span class='label'>Equilibrium</span><br><span class='value'>{}</span></div>
+        <div class='tech-item'><span class='label'>Chart Pattern</span><br><span class='value' style='color:#00ff88;'>{}</span></div>
+        <div class='tech-item'><span class='label'>QM Level</span><br><span class='value' style='color:#66ccff;'>{}</span></div>
+    </div>
+    """.format(
+        pivot, r1, r2, r3, s1, s2, s3,
+        eqh_str, eql_str,
+        f"{premium_status} ({premium_pct}%)",
+        equilibrium,
+        pattern_str,
+        qm_display
+    ), unsafe_allow_html=True)
+
+    # --- DESKRIPSI ---
+    daily_desc = get_daily_bias_description(daily_df, spot, bsl, ssl, eqh, eql, pivot_data, premium_status, patterns, qm_levels)
     st.markdown(f"""
-    <div style='display:flex; gap:20px; margin:10px 0; flex-wrap:wrap;'>
-        <span class='liquidity-badge' style='font-size:1rem;'>🎯 Buy-Side Liq (BSL): <b>{bsl}</b></span>
-        <span class='liquidity-badge' style='font-size:1rem;'>🎯 Sell-Side Liq (SSL): <b>{ssl}</b></span>
+    <div class='desc-box'>
+        <b>📝 Analisa Harian:</b> {daily_desc}
     </div>
     """, unsafe_allow_html=True)
 
+    # --- KEY LEVEL + CONFIDENCE ---
+    col_k1, col_k2, col_k3 = st.columns([1, 1, 1])
+    with col_k1:
+        st.markdown(f"<span class='liquidity-badge'>🎯 BSL (ERL): {bsl if bsl else '-'}</span>", unsafe_allow_html=True)
+    with col_k2:
+        st.markdown(f"<span class='liquidity-badge'>🎯 SSL (ERL): {ssl if ssl else '-'}</span>", unsafe_allow_html=True)
+    with col_k3:
+        rec_color = "🟢" if conf["direction"] == "BUY" else ("🔴" if conf["direction"] == "SELL" else "⏳")
+        st.markdown(f"""
+        <div class='conf-card' style='text-align:center;'>
+            <b>{rec_color} {conf['direction']} | {conf['label']}</b><br>
+            <span style='color:#ff4444;'>SELL {conf['sell']}%</span> 
+            <span style='color:#888;'>|</span> 
+            <span style='color:#00ff88;'>BUY {conf['buy']}%</span>
+        </div>
+        """, unsafe_allow_html=True)
+
     st.markdown("---")
 
-    # --- MODE BUTTONS (SCALPING / INTRADAY) ---
-    col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 3])
-    with col_btn1:
-        if st.button("⚡ SCALPING", use_container_width=True, 
-                     type="primary" if st.session_state.mode == "Scalping" else "secondary"):
-            st.session_state.mode = "Scalping"
-            st.session_state.triggered_orders = []
-            st.rerun()
-    with col_btn2:
-        if st.button("📈 INTRADAY", use_container_width=True,
-                     type="primary" if st.session_state.mode == "Intraday" else "secondary"):
-            st.session_state.mode = "Intraday"
-            st.session_state.triggered_orders = []
-            st.rerun()
+    # --- MODE BUTTONS ---
+    c_btn1, c_btn2, c_btn3 = st.columns([1, 1, 3])
+    with c_btn1:
+        if st.button("⚡ SCALPING", use_container_width=True, type="primary" if st.session_state.mode == "Scalping" else "secondary"):
+            st.session_state.mode = "Scalping"; st.session_state.triggered_orders = []; st.rerun()
+    with c_btn2:
+        if st.button("📈 INTRADAY", use_container_width=True, type="primary" if st.session_state.mode == "Intraday" else "secondary"):
+            st.session_state.mode = "Intraday"; st.session_state.triggered_orders = []; st.rerun()
 
-    # --- CHART TRADINGVIEW ---
+    # --- CHART ---
     tv_interval = "5" if st.session_state.mode == "Scalping" else "15"
     tv_html = f"""
     <div class="tradingview-widget-container" style="height:500px; margin-top:10px; border-radius:15px; overflow:hidden; border:1px solid #2a3240;">
         <div id="tv_chart"></div>
         <script src="https://s3.tradingview.com/tv.js"></script>
-        <script>
-        new TradingView.widget({{
-            "width":"100%","height":500,"symbol":"OANDA:XAUUSD","interval":"{tv_interval}",
-            "timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id",
-            "toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,
-            "allow_symbol_change":false,"container_id":"tv_chart"
-        }});
-        </script>
-    </div>
-    """
+        <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"OANDA:XAUUSD","interval":"{tv_interval}","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"container_id":"tv_chart"}});</script>
+    </div>"""
     components.html(tv_html, height=520)
 
     st.markdown("---")
-    st.markdown("### 🎯 Sinyal Limit Order")
-
-    # --- GENERATE SIGNAL ---
-    sell_sig, buy_sig, bias, supply_zones_raw, demand_zones_raw, bsl, ssl = generate_dual_signals("XAUUSD", mode=st.session_state.mode)
+    st.markdown("### 📊 4 Jenis Order (Limit / Stop) + Risk Level")
 
     # --- TRIGGER LOGIC ---
     live_price = None
@@ -662,135 +917,117 @@ else:
         df_live = yf.download("GC=F", period="1d", interval="1m")
         if not df_live.empty:
             live_price = float(df_live["Close"].iloc[-1])
-    except:
-        pass
+    except: pass
 
     if live_price is not None:
         to_remove = []
-        for order in st.session_state.triggered_orders:
-            if order["status"] != "running": continue
-            if order["direction"] == "BUY":
-                if live_price <= order["sl"] or live_price >= order["tp3"]:
-                    to_remove.append(order["id"])
-            else:
-                if live_price >= order["sl"] or live_price <= order["tp3"]:
-                    to_remove.append(order["id"])
+        for o in st.session_state.triggered_orders:
+            if o["status"] != "running": continue
+            if o["direction"] == "BUY" and (live_price <= o["sl"] or live_price >= o["tp3"]): to_remove.append(o["id"])
+            if o["direction"] == "SELL" and (live_price >= o["sl"] or live_price <= o["tp3"]): to_remove.append(o["id"])
         st.session_state.triggered_orders = [o for o in st.session_state.triggered_orders if o["id"] not in to_remove]
 
-    if live_price is not None:
-        if sell_sig and live_price >= sell_sig["entry"]:
-            already = any(o["direction"] == "SELL" and o["entry"] == sell_sig["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders)
-            if not already:
-                st.session_state.triggered_orders.append({
-                    "id": f"SELL_{st.session_state.trigger_counter}",
-                    "direction": "SELL",
-                    "entry": sell_sig["entry"],
-                    "sl": sell_sig["sl"],
-                    "tp1": sell_sig["tp1"],
-                    "tp2": sell_sig["tp2"],
-                    "tp3": sell_sig["tp3"],
-                    "tp4": sell_sig["tp4"],
-                    "reason": f"SELL | TP1=Likuiditas(SSL) {sell_sig['tp1']} | {sell_sig['reason']}",
-                    "status": "running",
-                    "pair": "XAUUSD"
-                })
-                st.session_state.trigger_counter += 1
+        for key, order in orders.items():
+            if order is None: continue
+            if any(o["entry"] == order["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
+                continue
+            if order["direction"] == "SELL":
+                if order["type"] == "LIMIT" and live_price >= order["entry"]:
+                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"})
+                    st.session_state.trigger_counter += 1
+                elif order["type"] == "STOP" and live_price <= order["entry"]:
+                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"})
+                    st.session_state.trigger_counter += 1
+            elif order["direction"] == "BUY":
+                if order["type"] == "LIMIT" and live_price <= order["entry"]:
+                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"})
+                    st.session_state.trigger_counter += 1
+                elif order["type"] == "STOP" and live_price >= order["entry"]:
+                    st.session_state.triggered_orders.append({**order, "status": "running", "id": f"{key}_{st.session_state.trigger_counter}"})
+                    st.session_state.trigger_counter += 1
 
-        if buy_sig and live_price <= buy_sig["entry"]:
-            already = any(o["direction"] == "BUY" and o["entry"] == buy_sig["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders)
-            if not already:
-                st.session_state.triggered_orders.append({
-                    "id": f"BUY_{st.session_state.trigger_counter}",
-                    "direction": "BUY",
-                    "entry": buy_sig["entry"],
-                    "sl": buy_sig["sl"],
-                    "tp1": buy_sig["tp1"],
-                    "tp2": buy_sig["tp2"],
-                    "tp3": buy_sig["tp3"],
-                    "tp4": buy_sig["tp4"],
-                    "reason": f"BUY | TP1=Likuiditas(BSL) {buy_sig['tp1']} | {buy_sig['reason']}",
-                    "status": "running",
-                    "pair": "XAUUSD"
-                })
-                st.session_state.trigger_counter += 1
-
-    # --- TAMPILAN SINYAL (2 KOLOM) ---
-    col1, col2 = st.columns(2)
-
-    with col1:
-        active_sell = any(o["direction"] == "SELL" and o["status"] == "running" for o in st.session_state.triggered_orders)
-        if active_sell:
-            st.markdown("""<div class='sell-card'><h3>⏳ MENUNGGU SELL</h3><p>Zona supply aktif sedang berjalan.</p></div>""", unsafe_allow_html=True)
+    # --- RENDER ORDER CARDS ---
+    def render_order_card(order, key):
+        if order is None: return ""
+        dir_emoji = "🔴" if order["direction"] == "SELL" else "🟢"
+        card_class = "sell-card" if order["direction"] == "SELL" else "buy-card"
+        status = "Pending"
+        if any(o["entry"] == order["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
+            status = "✅ RUNNING"
+        
+        # Risk badge
+        risk_badge = ""
+        if "SAFE" in order.get("risk_label", ""):
+            risk_badge = "<span class='risk-safe'>✅ SAFE</span>"
+        elif "HIGH RISK" in order.get("risk_label", ""):
+            risk_badge = "<span class='risk-high'>⚠️ HIGH RISK</span>"
         else:
-            if sell_sig:
-                st.markdown(f"""
-                <div class='sell-card'>
-                    <div class='signal-header'>
-                        <span class='signal-title'>🔴 SELL LIMIT</span>
-                        <span class='signal-price' style='color:#ff6666;'>{sell_sig['entry']}</span>
-                    </div>
-                    <div class='chip-container'>
-                        <span class='chip chip-sl'>⛔ SL {sell_sig['sl']}</span>
-                        <span class='chip chip-tp'>🏆 TP1(Liq) {sell_sig['tp1']}</span>
-                        <span class='chip chip-tp'>🏆 TP2 {sell_sig['tp2']}</span>
-                        <span class='chip chip-tp'>🏆 TP3 {sell_sig['tp3']}</span>
-                    </div>
-                    <div class='zone-footer'>📍 Zona: {sell_sig['zone_low']} - {sell_sig['zone_high']} | {sell_sig['reason']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.info("📭 Tidak ada Supply Zone valid di atas harga.")
+            risk_badge = "<span class='risk-wait'>⏳ Need Confirmation</span>"
+        
+        return f"""
+        <div class='{card_class}'>
+            <div class='signal-header'>
+                <span class='signal-title'>{dir_emoji} {order['direction']} {order['type']}</span>
+                <span>{risk_badge} {status}</span>
+            </div>
+            <div style='display:flex; justify-content:space-between;'>
+                <span><b>Entry</b> <span style='font-family:monospace;'>{order['entry']}</span></span>
+                <span><b>SL</b> <span style='color:#ff6666;'>{order['sl']}</span></span>
+            </div>
+            <div class='chip-container'>
+                <span class='chip chip-tp1'>🏆 TP1 (Nearest) {order['tp1']}</span>
+                <span class='chip chip-tp'>🏆 TP2 (iRL) {order['tp2']}</span>
+                <span class='chip chip-tp'>🏆 TP3 (ERL) {order['tp3']}</span>
+            </div>
+            <div class='zone-footer'><small>{order['reason']}</small></div>
+        </div>
+        """
 
-    with col2:
-        active_buy = any(o["direction"] == "BUY" and o["status"] == "running" for o in st.session_state.triggered_orders)
-        if active_buy:
-            st.markdown("""<div class='buy-card'><h3>⏳ MENUNGGU BUY</h3><p>Zona demand aktif sedang berjalan.</p></div>""", unsafe_allow_html=True)
-        else:
-            if buy_sig:
-                st.markdown(f"""
-                <div class='buy-card'>
-                    <div class='signal-header'>
-                        <span class='signal-title'>🟢 BUY LIMIT</span>
-                        <span class='signal-price' style='color:#66ff88;'>{buy_sig['entry']}</span>
-                    </div>
-                    <div class='chip-container'>
-                        <span class='chip chip-sl'>⛔ SL {buy_sig['sl']}</span>
-                        <span class='chip chip-tp'>🏆 TP1(Liq) {buy_sig['tp1']}</span>
-                        <span class='chip chip-tp'>🏆 TP2 {buy_sig['tp2']}</span>
-                        <span class='chip chip-tp'>🏆 TP3 {buy_sig['tp3']}</span>
-                    </div>
-                    <div class='zone-footer'>📍 Zona: {buy_sig['zone_low']} - {buy_sig['zone_high']} | {buy_sig['reason']}</div>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.info("📭 Tidak ada Demand Zone valid di bawah harga.")
+    col_sell, col_buy = st.columns(2)
+    with col_sell:
+        st.markdown("#### 🔻 SELL Orders")
+        st.markdown(render_order_card(orders["sell_limit"], "sell_limit"), unsafe_allow_html=True)
+        st.markdown(render_order_card(orders["sell_stop"], "sell_stop"), unsafe_allow_html=True)
+    with col_buy:
+        st.markdown("#### 🔺 BUY Orders")
+        st.markdown(render_order_card(orders["buy_limit"], "buy_limit"), unsafe_allow_html=True)
+        st.markdown(render_order_card(orders["buy_stop"], "buy_stop"), unsafe_allow_html=True)
 
     # --- RUNNING ORDERS ---
-    running_orders = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
-    if running_orders:
+    running = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
+    if running:
         st.markdown("---")
         st.markdown("### ⚡ Running Orders (Aktif)")
-        for order in running_orders:
-            emoji = "🔴" if order["direction"] == "SELL" else "🟢"
-            border_color = "#ff4444" if order["direction"] == "SELL" else "#00ff88"
+        for o in running:
+            emoji = "🔴" if o["direction"] == "SELL" else "🟢"
+            border = "#ff4444" if o["direction"] == "SELL" else "#00ff88"
+            risk_badge = ""
+            if "SAFE" in o.get("risk_label", ""):
+                risk_badge = "<span class='risk-safe'>✅ SAFE</span>"
+            elif "HIGH RISK" in o.get("risk_label", ""):
+                risk_badge = "<span class='risk-high'>⚠️ HIGH RISK</span>"
+            else:
+                risk_badge = "<span class='risk-wait'>⏳ Need Confirmation</span>"
             st.markdown(f"""
-            <div class='running-card' style='border-color:{border_color};'>
-                <div style='display:flex; justify-content:space-between;'><h3>{emoji} {order['direction']} RUNNING</h3><span style='color:#ffaa00;'>Entry tersentuh!</span></div>
-                <div class='order-grid'>
-                    <div class='order-item'><div class='label'>Entry</div><div class='value'>{order['entry']}</div></div>
-                    <div class='order-item'><div class='label'>SL</div><div class='value' style='color:#ff4444;'>{order['sl']}</div></div>
-                    <div class='order-item'><div class='label'>TP1</div><div class='value'>{order['tp1']}</div></div>
-                    <div class='order-item'><div class='label'>TP2</div><div class='value'>{order['tp2']}</div></div>
-                    <div class='order-item'><div class='label'>TP3</div><div class='value'>{order['tp3']}</div></div>
-                    <div class='order-item'><div class='label'>TP4</div><div class='value'>{order['tp4']}</div></div>
+            <div style='background:#1a1a2e; border:2px solid {border}; border-radius:20px; padding:15px; margin:10px 0;'>
+                <div style='display:flex; justify-content:space-between; align-items:center;'>
+                    <h3>{emoji} {o['direction']} {o['type']} RUNNING</h3>
+                    <span>{risk_badge}</span>
                 </div>
-                <div class='zone-footer'><small>{order['reason']}</small></div>
+                <div class='order-grid'>
+                    <div><span class='label'>Entry</span><br><b>{o['entry']}</b></div>
+                    <div><span class='label'>SL</span><br><b style='color:#ff4444;'>{o['sl']}</b></div>
+                    <div><span class='label'>TP1</span><br><b>{o['tp1']}</b></div>
+                    <div><span class='label'>TP2</span><br><b>{o['tp2']}</b></div>
+                    <div><span class='label'>TP3</span><br><b>{o['tp3']}</b></div>
+                </div>
+                <div class='zone-footer'><small>{o['reason']}</small></div>
             </div>
             """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class='footer'>
-        <small>© 2026 Alu Trading System — XAUUSD Only. Framework: Likuiditas (BSL/SSL) + CISD + OB.</small><br>
-        <small>⚠️ Disclaimer: Trading mengandung risiko. Sinyal ini bukan rekomendasi investasi.</small>
+        <small>© 2026 Alu System — XAUUSD. TP: Nearest Swing (TP1) | iRL (TP2) | ERL (TP3).</small><br>
+        <small>⚠️ Sinyal bukan rekomendasi investasi. Gunakan manajemen risiko.</small>
     </div>
     """, unsafe_allow_html=True)
