@@ -491,16 +491,16 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     range_high = float(daily_df["High"].iloc[-5:].max())
     range_low = float(daily_df["Low"].iloc[-5:].min())
 
-    # ========== PERUBAHAN UTAMA UNTUK SCALPING ==========
+    # ========== Tentukan Timeframe & Multiplier Dasar ==========
     if mode == "Scalping":
         zone_tf = "5m"
         entry_tf = "5m"
-        sl_mult = 0.6          # <--- SL = 0.6 x ATR (misal ATR=10 -> SL=6 poin)
+        base_sl_mult = 0.6   # akan disesuaikan dengan batas poin
         max_dist = 3.0
-    else:  # Intraday
+    else:
         zone_tf = "1h"
         entry_tf = "15m"
-        sl_mult = 1.5
+        base_sl_mult = 1.5
         max_dist = 5.0
 
     zone_df = dfs.get(zone_tf)
@@ -516,6 +516,35 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     atr = float((entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1])
     if pd.isna(atr) or atr <= 0:
         atr = price * 0.001
+
+    # ========== VOLATILITY LEVEL ==========
+    if atr < 8:
+        vol_label = "RENDAH"
+    elif atr < 15:
+        vol_label = "SEDANG"
+    elif atr < 25:
+        vol_label = "TINGGI"
+    else:
+        vol_label = "SANGAT TINGGI"
+
+    # ========== TENTUKAN SL MULTIPLIER & BATAS POIN UNTUK SCALPING ==========
+    if mode == "Scalping":
+        # Tentukan batas maksimal SL dalam poin berdasarkan vol_label
+        if vol_label == "SANGAT TINGGI":
+            max_sl_points = 15.0
+        elif vol_label == "TINGGI":
+            max_sl_points = 10.0
+        else:  # SEDANG atau RENDAH
+            max_sl_points = 8.0
+        
+        # Hitung SL dasar = atr * base_sl_mult, lalu batasi
+        sl_calc = atr * base_sl_mult
+        if sl_calc > max_sl_points:
+            sl_mult = max_sl_points / atr  # sesuaikan multiplier agar SL ≤ batas
+        else:
+            sl_mult = base_sl_mult
+    else:
+        sl_mult = base_sl_mult
 
     cisd = detect_cisd(entry_df)
     premium_pct, premium_status, equilibrium = calculate_premium_discount(price, range_high, range_low)
@@ -640,6 +669,9 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         extra_msgs = []
         extra_msgs.append(f"📊 VOL: {vol_status} ({vol_detail})")
         extra_msgs.append(f"📈 ADX: {adx_val} ({adx_status})")
+        extra_msgs.append(f"⚡ Volatilitas: {vol_label} (ATR={atr:.2f})")
+        if mode == "Scalping":
+            extra_msgs.append(f"🛡️ SL Multiplier: {sl_mult:.2f} → SL ~ {atr*sl_mult:.2f} poin (max {max_sl_points if vol_label in ['SANGAT TINGGI','TINGGI'] else 8.0})")
         if poc_price: extra_msgs.append(f"🎯 PoC: {poc_price}")
         if poc_confluence: extra_msgs.append("🔥 PoC CONFLUENCE!")
 
@@ -685,7 +717,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
         orders["sell_stop"] = build_order("STOP", "SELL", entry, sl, tp1, tp2, tp3,
             f"Sell Stop di bawah Swing Low {nearest_lows[0]:.2f}", "", "🔥 STOP ORDER", "HIGH RISK",
-            [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})"])
+            [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})", f"⚡ Volatilitas: {vol_label}"])
 
     if nearest_highs:
         entry = nearest_highs[0] + (atr * 0.5)
@@ -693,7 +725,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
         tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
         orders["buy_stop"] = build_order("STOP", "BUY", entry, sl, tp1, tp2, tp3,
             f"Buy Stop di atas Swing High {nearest_highs[0]:.2f}", "", "🔥 STOP ORDER", "HIGH RISK",
-            [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})"])
+            [f"📊 VOL: {vol_status}", f"📈 ADX: {adx_val} ({adx_status})", f"⚡ Volatilitas: {vol_label}"])
 
     sell_score, buy_score = 50, 50
     if bias == "SELL": sell_score += 20
@@ -783,7 +815,7 @@ if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.markdown("<br><br><h1 style='text-align:center;color:#FFD700;'>🥇 XAUUSD SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>SL Scalping &lt; 10 poin | Volume + ADX + PoC</p><br>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>SL Scalping Dibatasi Berdasarkan Volatilitas</p><br>", unsafe_allow_html=True)
         role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
         u = st.text_input("Username", value=st.session_state.saved_user)
         p = st.text_input("Password", type="password", value=st.session_state.saved_pass)
@@ -1005,7 +1037,7 @@ else:
     components.html(tv_html, height=520)
 
     st.markdown("---")
-    st.markdown("### 📊 4 Jenis Order + Volume, ADX, PoC (SL Scalping < 10 poin)")
+    st.markdown("### 📊 4 Jenis Order + SL Scalping Dibatasi Berdasarkan Volatilitas")
 
     # --- TRIGGER LOGIC ---
     live_price = None
@@ -1142,7 +1174,7 @@ else:
 
     st.markdown("""
     <div class='footer'>
-        <small>© 2026 Alu System — XAUUSD. SL Scalping = 0.6 x ATR (≈6-8 poin) | TP1=1:1.2, TP2=1:2, TP3=1:4.</small><br>
+        <small>© 2026 Alu System — XAUUSD. SL Scalping dibatasi: Sangat Tinggi ≤15pt, Tinggi ≤10pt, Sedang/Rendah ≤8pt.</small><br>
         <small>⚠️ Sinyal bukan rekomendasi investasi. Gunakan manajemen risiko.</small>
     </div>
     """, unsafe_allow_html=True)
