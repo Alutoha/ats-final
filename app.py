@@ -365,17 +365,49 @@ if "logged_in" not in st.session_state:
     st.session_state.triggered_orders = []
     st.session_state.trigger_counter = 0
 
-st.set_page_config(page_title="ATS", page_icon="📊", layout="wide")
+st.set_page_config(page_title="ATS - Alu Trading System", page_icon="📊", layout="wide")
 init_db()
 
+# ==================== GLOBAL CSS PREMIUM ====================
 st.markdown("""
 <style>
-.stApp {background:#0E1117}
-.sell-card {background:linear-gradient(135deg,#4a1a1a,#28110d);border:2px solid #ff4444;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
-.buy-card {background:linear-gradient(135deg,#1a472a,#0d2818);border:2px solid #00ff88;border-radius:20px;padding:25px;margin:15px 0;color:#fff}
-.running {border:2px dashed #ffff00 !important}
-.triggered-card {background:#1a1a2e; border:2px solid #ffaa00; border-radius:20px; padding:20px; margin:10px 0; color:#fff}
-.details {background:#1a1a2e;border-radius:15px;padding:15px;margin-top:10px}
+    .stApp { background: #0E1117; }
+    .main-header { text-align: center; padding: 10px 0; border-bottom: 1px solid #2a2a3a; margin-bottom: 20px; }
+    .main-header h1 { color: #00ff88; font-size: 2.2rem; margin: 0; letter-spacing: 2px; }
+    .main-header p { color: #888; margin: 5px 0 0 0; }
+    
+    .glass-card {
+        background: rgba(20, 25, 40, 0.8);
+        backdrop-filter: blur(5px);
+        border: 1px solid #2a3240;
+        border-radius: 20px;
+        padding: 20px;
+        margin: 10px 0;
+        transition: 0.3s;
+    }
+    .glass-card:hover { border-color: #00ff88; box-shadow: 0 0 20px rgba(0,255,136,0.05); }
+    
+    .sell-card { background: linear-gradient(145deg, #2a0f0f, #1a0808); border: 2px solid #ff4444; border-radius: 20px; padding: 25px; margin: 15px 0; color: #fff; box-shadow: 0 4px 15px rgba(255,68,68,0.2); }
+    .buy-card { background: linear-gradient(145deg, #0f2a1a, #08180d); border: 2px solid #00ff88; border-radius: 20px; padding: 25px; margin: 15px 0; color: #fff; box-shadow: 0 4px 15px rgba(0,255,136,0.2); }
+    
+    .running-card { background: #1a1a2e; border: 2px solid #ffaa00; border-radius: 20px; padding: 20px; margin: 10px 0; color: #fff; box-shadow: 0 0 20px rgba(255,170,0,0.1); }
+    
+    .order-details { background: #0E1117; border-radius: 12px; padding: 12px; margin-top: 10px; border-left: 3px solid #00ff88; font-size: 0.9rem; color: #aaa; }
+    .order-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; }
+    .order-item { background: #0E1117; padding: 8px 12px; border-radius: 8px; text-align: center; border: 1px solid #2a3240; }
+    .order-item .label { font-size: 0.7rem; color: #888; text-transform: uppercase; }
+    .order-item .value { font-weight: bold; font-family: monospace; font-size: 1.1rem; }
+
+    .bias-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; background: #2a3240; color: #ccc; }
+    .bias-buy { background: #00ff8822; border: 1px solid #00ff88; color: #00ff88; }
+    .bias-sell { background: #ff444422; border: 1px solid #ff4444; color: #ff4444; }
+    .bias-neutral { background: #ffaa0022; border: 1px solid #ffaa00; color: #ffaa00; }
+    
+    .price-ticker { font-size: 2rem; font-weight: bold; font-family: monospace; }
+    .green { color: #00ff88; }
+    .red { color: #ff4444; }
+    
+    .footer { text-align: center; color: #555; padding: 20px 0; font-size: 0.8rem; border-top: 1px solid #1a1a2a; margin-top: 30px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -384,7 +416,7 @@ if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         st.markdown("<br><br><h1 style='text-align:center;color:#00ff88;'>📊 ALU TRADING SYSTEM</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align:center;color:#888;'>Dual-Zone Limit Signal</p><br>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#888;'>Dual-Zone Limit Signal Framework</p><br>", unsafe_allow_html=True)
         role = st.radio("Login sebagai:", ["User", "Admin"], horizontal=True)
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -406,7 +438,7 @@ if not st.session_state.logged_in:
                 else:
                     st.error(f"❌ {err}")
 
-# ==================== ADMIN PANEL ====================
+# ==================== ADMIN PANEL (TIDAK DIUBAH) ====================
 elif st.session_state.role == "admin":
     st.sidebar.markdown("<h2 style='color:#00ff88;'>👑 ADMIN</h2>", unsafe_allow_html=True)
     if st.sidebar.button("🚪 LOGOUT"):
@@ -465,12 +497,15 @@ elif st.session_state.role == "admin":
             else:
                 st.error("❌ Password lama salah")
 
-# ==================== USER DASHBOARD ====================
+# ==================== USER DASHBOARD (DIPERBAIKI TAMPILAN) ====================
 else:
+    # --- SIDEBAR ---
     with st.sidebar:
-        st.markdown(f"<h3 style='color:#00ff88;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='color:#00ff88; margin-bottom:0;'>👤 {st.session_state.nama}</h3>", unsafe_allow_html=True)
+        
+        # Jam Live
         components.html("""
-        <div id="live-clock" style="color:#cccccc; font-size:16px; margin-bottom:10px;"></div>
+        <div id="live-clock" style="color:#cccccc; font-size:15px; margin:5px 0 15px 0;"></div>
         <script>
         function updateClock() {
             var now = new Date();
@@ -487,8 +522,9 @@ else:
         updateClock();
         setInterval(updateClock, 1000);
         </script>
-        """, height=60)
-        st.markdown(f"<p style='color:#888;'>{datetime.now().strftime('%A, %d %B %Y')}</p>", unsafe_allow_html=True)
+        """, height=65)
+        
+        # Sisa Masa Aktif
         conn = get_conn()
         c = conn.cursor()
         c.execute("SELECT expired_date, is_trial FROM users WHERE nama=?", (st.session_state.nama,))
@@ -497,19 +533,36 @@ else:
         if row:
             exp = datetime.strptime(row[0], "%Y-%m-%d")
             sisa = (exp - datetime.now()).days
-            st.info(f"⏳ {sisa} hari tersisa" if not row[1] else f"🎁 Trial {sisa} hari")
+            if sisa < 0: sisa = 0
+            status_text = f"🎁 Trial {sisa} hari" if row[1] else f"⏳ {sisa} hari tersisa"
+            st.info(status_text)
+        
+        st.markdown("---")
+        st.markdown("### ⚙️ Kontrol")
         if st.button("🚪 LOGOUT", use_container_width=True):
             st.session_state.logged_in = False
             st.rerun()
-        # Tombol Clear di sidebar dengan key unik
-        if st.button("🗑️ Clear All Triggered Orders", use_container_width=True, key="clear_sidebar"):
+        if st.button("🗑️ Clear Orders", use_container_width=True, key="clear_sidebar"):
             st.session_state.triggered_orders = []
             st.rerun()
 
-    st.markdown("<h2 style='color:#00ff88;'>📊 ATS / Alu Trading System</h2>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color:#ccc;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
-    st.markdown("---")
+    # --- HEADER UTAMA ---
+    col_head1, col_head2 = st.columns([3,1])
+    with col_head1:
+        st.markdown("<h1 style='color:#00ff88; margin-bottom:0;'>📊 ATS Dashboard</h1>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color:#888; margin-top:0;'>👤 {st.session_state.nama} | 📅 {datetime.now().strftime('%d %B %Y')}</p>", unsafe_allow_html=True)
+    with col_head2:
+        # Live Price Ticker
+        ticker = SYMBOL_MAP.get(st.session_state.pair, "GC=F")
+        try:
+            df_live = yf.download(ticker, period="1d", interval="1m")
+            if not df_live.empty:
+                live_p = float(df_live["Close"].iloc[-1])
+                st.metric(label="💵 Harga Spot", value=f"{live_p:.2f}", delta=None)
+        except:
+            pass
 
+    # --- PAIR SELECTOR ---
     kategori = st.selectbox("Kategori", ["KOMODITAS","FOREX","CRYPTO"])
     if kategori == "KOMODITAS":
         pairs = ["XAUUSD","XAGUSD","USOIL"]
@@ -517,25 +570,64 @@ else:
         pairs = ["EURUSD","GBPUSD","USDJPY","AUDUSD","NZDUSD","USDCAD","USDCHF"]
     else:
         pairs = ["BTCUSD","ETHUSD","XRPUSD","ADAUSD","SOLUSD"]
-    pair = st.selectbox("Pair", pairs, index=pairs.index(st.session_state.pair) if st.session_state.pair in pairs else 0)
+    
+    current_pair = st.session_state.pair
+    if current_pair in pairs:
+        idx = pairs.index(current_pair)
+    else:
+        idx = 0
+    pair = st.selectbox("Pair", pairs, index=idx)
     if pair != st.session_state.pair:
         st.session_state.triggered_orders = []
         st.session_state.pair = pair
 
+    # --- TRADINGVIEW CHART (WAJIB DIPERTAHANKAN) ---
+    tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
+    tv_html = f"""
+    <div class="tradingview-widget-container" style="height:500px; margin-top:10px; border-radius:15px; overflow:hidden; border:1px solid #2a3240;">
+        <div id="tv_chart"></div>
+        <script src="https://s3.tradingview.com/tv.js"></script>
+        <script>
+        new TradingView.widget({{
+            "width":"100%",
+            "height":500,
+            "symbol":"{tv_sym}",
+            "interval":"15",
+            "timezone":"Asia/Jakarta",
+            "theme":"dark",
+            "style":"1",
+            "locale":"id",
+            "toolbar_bg":"#0E1117",
+            "enable_publishing":false,
+            "hide_side_toolbar":false,
+            "allow_symbol_change":false,
+            "container_id":"tv_chart"
+        }});
+        </script>
+    </div>
+    """
+    components.html(tv_html, height=520)
+
+    # --- GENERATE SIGNAL & BIAS ---
     sell_sig, buy_sig, bias = generate_dual_signals(pair)
+    
+    # Tampilkan Bias
+    bias_color = "bias-neutral"
+    if bias == "BUY": bias_color = "bias-buy"
+    elif bias == "SELL": bias_color = "bias-sell"
+    st.markdown(f"<div style='display:flex; justify-content:center; gap:20px; margin:10px 0;'><span>📈 Daily Bias:</span> <span class='bias-badge {bias_color}'>{bias}</span></div>", unsafe_allow_html=True)
 
-    @st.cache_data(ttl=60)
-    def get_live_price(symbol):
-        ticker = SYMBOL_MAP.get(symbol, "GC=F")
-        try:
-            df = yf.download(ticker, period="1d", interval="1m")
-            if not df.empty:
-                return float(df["Close"].iloc[-1])
-        except:
-            pass
-        return None
+    st.markdown("---")
+    st.markdown("### 🎯 Sinyal Limit Order (Pending)")
 
-    live_price = get_live_price(pair)
+    # --- LOGIKA TRIGGER OTOMATIS ---
+    live_price = None
+    try:
+        df_live = yf.download(SYMBOL_MAP.get(pair, "GC=F"), period="1d", interval="1m")
+        if not df_live.empty:
+            live_price = float(df_live["Close"].iloc[-1])
+    except:
+        pass
 
     if live_price is not None:
         to_remove = []
@@ -550,118 +642,111 @@ else:
                     to_remove.append(order["id"])
         st.session_state.triggered_orders = [o for o in st.session_state.triggered_orders if o["id"] not in to_remove]
 
+    # Trigger baru
     if live_price is not None:
         if sell_sig and live_price >= sell_sig["entry"]:
-            already_triggered = any(o["direction"] == "SELL" and o["entry"] == sell_sig["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders)
-            if not already_triggered:
-                order = {
+            already = any(o["direction"] == "SELL" and o["entry"] == sell_sig["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders)
+            if not already:
+                st.session_state.triggered_orders.append({
                     "id": f"SELL_{st.session_state.trigger_counter}",
-                    "direction": "SELL",
-                    "entry": sell_sig["entry"],
-                    "sl": sell_sig["sl"],
-                    "tp1": sell_sig["tp1"],
-                    "tp2": sell_sig["tp2"],
-                    "tp3": sell_sig["tp3"],
-                    "tp4": sell_sig["tp4"],
-                    "reason": sell_sig["reason"],
-                    "status": "running",
-                    "pair": pair
-                }
-                st.session_state.triggered_orders.append(order)
+                    "direction": "SELL", "entry": sell_sig["entry"], "sl": sell_sig["sl"],
+                    "tp1": sell_sig["tp1"], "tp2": sell_sig["tp2"], "tp3": sell_sig["tp3"],
+                    "tp4": sell_sig["tp4"], "reason": sell_sig["reason"], "status": "running", "pair": pair
+                })
                 st.session_state.trigger_counter += 1
 
         if buy_sig and live_price <= buy_sig["entry"]:
-            already_triggered = any(o["direction"] == "BUY" and o["entry"] == buy_sig["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders)
-            if not already_triggered:
-                order = {
+            already = any(o["direction"] == "BUY" and o["entry"] == buy_sig["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders)
+            if not already:
+                st.session_state.triggered_orders.append({
                     "id": f"BUY_{st.session_state.trigger_counter}",
-                    "direction": "BUY",
-                    "entry": buy_sig["entry"],
-                    "sl": buy_sig["sl"],
-                    "tp1": buy_sig["tp1"],
-                    "tp2": buy_sig["tp2"],
-                    "tp3": buy_sig["tp3"],
-                    "tp4": buy_sig["tp4"],
-                    "reason": buy_sig["reason"],
-                    "status": "running",
-                    "pair": pair
-                }
-                st.session_state.triggered_orders.append(order)
+                    "direction": "BUY", "entry": buy_sig["entry"], "sl": buy_sig["sl"],
+                    "tp1": buy_sig["tp1"], "tp2": buy_sig["tp2"], "tp3": buy_sig["tp3"],
+                    "tp4": buy_sig["tp4"], "reason": buy_sig["reason"], "status": "running", "pair": pair
+                })
                 st.session_state.trigger_counter += 1
 
-    tv_sym = TV_SYMBOL.get(pair, "OANDA:XAUUSD")
-    tv = f"""<div class="tradingview-widget-container" style="height:500px"><div id="tv"></div>
-    <script src="https://s3.tradingview.com/tv.js"></script>
-    <script>new TradingView.widget({{"width":"100%","height":500,"symbol":"{tv_sym}","interval":"15","timezone":"Asia/Jakarta","theme":"dark","style":"1","locale":"id","toolbar_bg":"#0E1117","enable_publishing":false,"hide_side_toolbar":false,"allow_symbol_change":false,"container_id":"tv"}});</script></div>"""
-    components.html(tv, height=520)
-
-    st.markdown("---")
-    st.subheader("🎯 Sinyal Limit Order (Pending)")
+    # --- TAMPILAN DUAL ZONE ---
     col1, col2 = st.columns(2)
+
     with col1:
-        active_sell_trigger = any(o["direction"] == "SELL" and o["status"] == "running" for o in st.session_state.triggered_orders)
-        if active_sell_trigger:
-            st.markdown("""<div class='sell-card'><h3>🟡 Waiting new SELL LIMIT</h3><p>Zona supply belum valid / sedang menunggu setup baru.</p></div>""", unsafe_allow_html=True)
+        active_sell = any(o["direction"] == "SELL" and o["status"] == "running" for o in st.session_state.triggered_orders)
+        if active_sell:
+            st.markdown("""<div class='sell-card'><h3 style='margin-top:0;'>⏳ MENUNGGU SELL</h3><p style='color:#ff8888;'>Zona supply sudah terisi atau sedang menunggu setup baru.</p><small style='color:#888;'>Harga menyentuh zona, order aktif di bawah.</small></div>""", unsafe_allow_html=True)
         else:
             if sell_sig:
                 st.markdown(f"""
                 <div class='sell-card'>
-                    <h3>🔴 SELL LIMIT (Pending)</h3>
-                    <p>ENTRY: {sell_sig['entry']:.2f}</p>
-                    <p>SL: {sell_sig['sl']:.2f}</p>
-                    <p>TP1: {sell_sig['tp1']:.2f}</p>
-                    <p>TP2: {sell_sig['tp2']:.2f}</p>
-                    <p>TP3: {sell_sig['tp3']:.2f}</p>
-                    <p>TP4: {sell_sig['tp4']}</p>
-                    <div class='details'><small>{sell_sig['reason']}</small></div>
-                </div>""", unsafe_allow_html=True)
+                    <h3 style='margin-top:0;'>🔴 SELL LIMIT (Pending)</h3>
+                    <div class='order-grid'>
+                        <div class='order-item'><div class='label'>Entry</div><div class='value' style='color:#ff6666;'>{sell_sig['entry']:.2f}</div></div>
+                        <div class='order-item'><div class='label'>Stop Loss</div><div class='value' style='color:#ff4444;'>{sell_sig['sl']:.2f}</div></div>
+                    </div>
+                    <div class='order-grid'>
+                        <div class='order-item'><div class='label'>TP 1 (1:1)</div><div class='value'>{sell_sig['tp1']:.2f}</div></div>
+                        <div class='order-item'><div class='label'>TP 2 (1:1.5)</div><div class='value'>{sell_sig['tp2']:.2f}</div></div>
+                        <div class='order-item'><div class='label'>TP 3 (1:2)</div><div class='value'>{sell_sig['tp3']:.2f}</div></div>
+                    </div>
+                    <div class='order-details'><small>📍 Zona: {sell_sig['zone_high']:.2f} - {sell_sig['zone_low']:.2f} | {sell_sig['reason']}</small></div>
+                </div>
+                """, unsafe_allow_html=True)
             else:
-                st.info("Tidak ada supply zone valid di atas harga.")
+                st.info("📭 Tidak ada supply zone valid di atas harga.")
+
     with col2:
-        active_buy_trigger = any(o["direction"] == "BUY" and o["status"] == "running" for o in st.session_state.triggered_orders)
-        if active_buy_trigger:
-            st.markdown("""<div class='buy-card'><h3>🟡 Waiting new BUY LIMIT</h3><p>Zona demand belum valid / sedang menunggu setup baru.</p></div>""", unsafe_allow_html=True)
+        active_buy = any(o["direction"] == "BUY" and o["status"] == "running" for o in st.session_state.triggered_orders)
+        if active_buy:
+            st.markdown("""<div class='buy-card'><h3 style='margin-top:0;'>⏳ MENUNGGU BUY</h3><p style='color:#88ffaa;'>Zona demand sudah terisi atau sedang menunggu setup baru.</p><small style='color:#888;'>Harga menyentuh zona, order aktif di bawah.</small></div>""", unsafe_allow_html=True)
         else:
             if buy_sig:
                 st.markdown(f"""
                 <div class='buy-card'>
-                    <h3>🟢 BUY LIMIT (Pending)</h3>
-                    <p>ENTRY: {buy_sig['entry']:.2f}</p>
-                    <p>SL: {buy_sig['sl']:.2f}</p>
-                    <p>TP1: {buy_sig['tp1']:.2f}</p>
-                    <p>TP2: {buy_sig['tp2']:.2f}</p>
-                    <p>TP3: {buy_sig['tp3']:.2f}</p>
-                    <p>TP4: {buy_sig['tp4']}</p>
-                    <div class='details'><small>{buy_sig['reason']}</small></div>
-                </div>""", unsafe_allow_html=True)
+                    <h3 style='margin-top:0;'>🟢 BUY LIMIT (Pending)</h3>
+                    <div class='order-grid'>
+                        <div class='order-item'><div class='label'>Entry</div><div class='value' style='color:#66ff88;'>{buy_sig['entry']:.2f}</div></div>
+                        <div class='order-item'><div class='label'>Stop Loss</div><div class='value' style='color:#ff4444;'>{buy_sig['sl']:.2f}</div></div>
+                    </div>
+                    <div class='order-grid'>
+                        <div class='order-item'><div class='label'>TP 1 (1:1)</div><div class='value'>{buy_sig['tp1']:.2f}</div></div>
+                        <div class='order-item'><div class='label'>TP 2 (1:1.5)</div><div class='value'>{buy_sig['tp2']:.2f}</div></div>
+                        <div class='order-item'><div class='label'>TP 3 (1:2)</div><div class='value'>{buy_sig['tp3']:.2f}</div></div>
+                    </div>
+                    <div class='order-details'><small>📍 Zona: {buy_sig['zone_high']:.2f} - {buy_sig['zone_low']:.2f} | {buy_sig['reason']}</small></div>
+                </div>
+                """, unsafe_allow_html=True)
             else:
-                st.info("Tidak ada demand zone valid di bawah harga.")
+                st.info("📭 Tidak ada demand zone valid di bawah harga.")
 
+    # --- ACTIVE TRIGGERED ORDERS ---
     running_orders = [o for o in st.session_state.triggered_orders if o["status"] == "running"]
     if running_orders:
         st.markdown("---")
-        st.subheader("⚡ Active Triggered Orders")
+        st.markdown("### ⚡ Running Orders (Aktif)")
         for order in running_orders:
-            direction = order["direction"]
-            emoji = "🔴" if direction == "SELL" else "🟢"
-            tp4_str = f"<p>TP4: {order['tp4']}</p>" if order['tp4'] == "Open" else f"<p>TP4: {order['tp4']:.2f}</p>"
+            emoji = "🔴" if order["direction"] == "SELL" else "🟢"
+            border_color = "#ff4444" if order["direction"] == "SELL" else "#00ff88"
             st.markdown(f"""
-            <div class='triggered-card'>
-                <h3>{emoji} {direction} RUNNING</h3>
-                <p>ENTRY: {order['entry']:.2f}</p>
-                <p>SL: {order['sl']:.2f}</p>
-                <p>TP1: {order['tp1']:.2f}</p>
-                <p>TP2: {order['tp2']:.2f}</p>
-                <p>TP3: {order['tp3']:.2f}</p>
-                {tp4_str}
-                <div class='details'><small>{order['reason']}</small></div>
+            <div class='running-card' style='border-color:{border_color};'>
+                <div style='display:flex; justify-content:space-between; align-items:center;'>
+                    <h3 style='margin:0;'>{emoji} {order['direction']} RUNNING</h3>
+                    <span style='color:#ffaa00; font-size:0.8rem;'>Entry tersentuh!</span>
+                </div>
+                <div class='order-grid'>
+                    <div class='order-item'><div class='label'>Entry</div><div class='value'>{order['entry']:.2f}</div></div>
+                    <div class='order-item'><div class='label'>SL</div><div class='value' style='color:#ff4444;'>{order['sl']:.2f}</div></div>
+                    <div class='order-item'><div class='label'>TP1</div><div class='value'>{order['tp1']:.2f}</div></div>
+                    <div class='order-item'><div class='label'>TP2</div><div class='value'>{order['tp2']:.2f}</div></div>
+                    <div class='order-item'><div class='label'>TP3</div><div class='value'>{order['tp3']:.2f}</div></div>
+                    <div class='order-item'><div class='label'>TP4</div><div class='value'>{order['tp4']}</div></div>
+                </div>
+                <div class='order-details'><small>{order['reason']}</small></div>
             </div>
             """, unsafe_allow_html=True)
 
-    st.markdown("---")
+    # --- FOOTER ---
     st.markdown("""
-    <div style='text-align:center; color:#888; padding:10px;'>
+    <div class='footer'>
         <small>© 2026 Alu Trading System. All rights reserved.</small><br>
-        <small>Disclaimer: Trading mengandung risiko. Sinyal ini bukan rekomendasi investasi. Gunakan dengan bijak.</small>
+        <small>⚠️ Disclaimer: Trading mengandung risiko. Sinyal ini bukan rekomendasi investasi. Gunakan dengan bijak.</small>
     </div>
     """, unsafe_allow_html=True)
