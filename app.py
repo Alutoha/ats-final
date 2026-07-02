@@ -235,7 +235,7 @@ def detect_cisd(df):
             return "BEARISH_CISD"
     return None
 
-# ==================== PIVOT POINTS (R1-R3, S1-S3) ====================
+# ==================== PIVOT POINTS ====================
 def calculate_pivots(daily_df):
     if daily_df is None or daily_df.empty:
         return None, None, None, None, None, None, None
@@ -254,33 +254,25 @@ def calculate_pivots(daily_df):
     
     return round(pivot, 2), round(r1, 2), round(r2, 2), round(r3, 2), round(s1, 2), round(s2, 2), round(s3, 2)
 
-# ==================== EQH/EQL DETECTION ====================
+# ==================== EQH/EQL ====================
 def detect_eqh_eql(df, strength=2, tolerance=0.5):
-    """
-    Deteksi Equal Highs (EQH) dan Equal Lows (EQL) dari swing points.
-    tolerance dalam poin (misal 0.5 untuk XAUUSD)
-    """
     sh_idx, sl_idx = find_swings(df, strength)
     eqh_levels = []
     eql_levels = []
     
-    # Ambil nilai swing highs dan lows
     swing_highs = [float(df["High"].iloc[i]) for i in sh_idx]
     swing_lows = [float(df["Low"].iloc[i]) for i in sl_idx]
     
-    # Cari EQH (high yang nilainya hampir sama)
     for i in range(len(swing_highs)):
         for j in range(i+1, len(swing_highs)):
             if abs(swing_highs[i] - swing_highs[j]) <= tolerance:
                 eqh_levels.append(round((swing_highs[i] + swing_highs[j]) / 2, 2))
     
-    # Cari EQL (low yang nilainya hampir sama)
     for i in range(len(swing_lows)):
         for j in range(i+1, len(swing_lows)):
             if abs(swing_lows[i] - swing_lows[j]) <= tolerance:
                 eql_levels.append(round((swing_lows[i] + swing_lows[j]) / 2, 2))
     
-    # Ambil yang unik
     eqh_levels = list(set(eqh_levels))[:3] if eqh_levels else []
     eql_levels = list(set(eql_levels))[:3] if eql_levels else []
     
@@ -288,11 +280,9 @@ def detect_eqh_eql(df, strength=2, tolerance=0.5):
 
 # ==================== PREMIUM / DISCOUNT / EQUILIBRIUM ====================
 def calculate_premium_discount(price, range_high, range_low):
-    """Hitung premium/discount berdasarkan posisi harga dalam range"""
     if range_high == range_low:
-        return 0, "NEUTRAL"
+        return 0, "NEUTRAL", 0
     mid = (range_high + range_low) / 2
-    # Premium: harga > equilibrium, Discount: harga < equilibrium
     diff_pct = ((price - mid) / (range_high - range_low)) * 100
     if diff_pct > 10:
         status = "PREMIUM (Overbought)"
@@ -302,38 +292,31 @@ def calculate_premium_discount(price, range_high, range_low):
         status = "EQUILIBRIUM (Fair Value)"
     return round(diff_pct, 1), status, round(mid, 2)
 
-# ==================== CHART PATTERN DETECTION ====================
+# ==================== CHART PATTERN ====================
 def detect_chart_patterns(df, strength=2):
-    """
-    Deteksi pola chart sederhana: Double Top, Double Bottom, Head & Shoulders (sederhana)
-    """
+    if len(df) < 10:
+        return ["Data terlalu sedikit untuk deteksi pola"]
     sh_idx, sl_idx = find_swings(df.iloc[-30:], strength=2)
     patterns = []
     
     if len(sh_idx) >= 3:
         highs = [float(df["High"].iloc[i]) for i in sh_idx[-5:]]
-        # Double Top: dua high hampir sama
         if len(highs) >= 2 and abs(highs[-1] - highs[-2]) < 1.5:
             patterns.append("🔺 Double Top (potensi bearish)")
-        # Head & Shoulders (sederhana): high tengah lebih tinggi dari kiri/kanan
         if len(highs) >= 3 and highs[-2] > highs[-1] and highs[-2] > highs[-3]:
             patterns.append("🔺 Head & Shoulders (bearish)")
     
     if len(sl_idx) >= 3:
         lows = [float(df["Low"].iloc[i]) for i in sl_idx[-5:]]
-        # Double Bottom: dua low hampir sama
         if len(lows) >= 2 and abs(lows[-1] - lows[-2]) < 1.5:
             patterns.append("🔻 Double Bottom (potensi bullish)")
-        # Inverse Head & Shoulders
         if len(lows) >= 3 and lows[-2] < lows[-1] and lows[-2] < lows[-3]:
             patterns.append("🔻 Inverse H&S (bullish)")
     
-    # Bullish/Bearish Flag sederhana (konsolidasi setelah move)
     if len(df) >= 10:
         range_20 = (df["High"].iloc[-10:] - df["Low"].iloc[-10:]).mean()
-        range_50 = (df["High"].iloc[-50:] - df["Low"].iloc[-50:]).mean()
+        range_50 = (df["High"].iloc[-50:] - df["Low"].iloc[-50:]).mean() if len(df) >= 50 else range_20 * 1.5
         if range_20 < range_50 * 0.6:
-            # Konsolidasi
             last_close = df["Close"].iloc[-1]
             if last_close > df["Close"].iloc[-5]:
                 patterns.append("🏁 Bullish Flag (breakout potential)")
@@ -345,11 +328,8 @@ def detect_chart_patterns(df, strength=2):
     
     return patterns
 
-# ==================== QM LEVEL (Quantitative Model Level) ====================
+# ==================== QM LEVEL ====================
 def calculate_qm_levels(df, atr_mult=2.0):
-    """
-    QM Level: level-level berdasarkan ATR dan volume-weighted average
-    """
     if df is None or df.empty or len(df) < 20:
         return []
     
@@ -358,19 +338,16 @@ def calculate_qm_levels(df, atr_mult=2.0):
     if pd.isna(atr) or atr <= 0:
         atr = price * 0.001
     
-    # Volume Weighted Average Price (VWAP sederhana)
+    # Volume Weighted Average Price (sederhana)
     vwap = (df["Close"] * df["Volume"]).sum() / df["Volume"].sum() if "Volume" in df.columns else price
     
     levels = []
-    # QM Level 1: ATR-based support/resistance
     levels.append({"level": round(price + atr * 0.5, 2), "type": "QM R1", "desc": "Resistance 0.5 ATR"})
     levels.append({"level": round(price - atr * 0.5, 2), "type": "QM S1", "desc": "Support 0.5 ATR"})
     levels.append({"level": round(price + atr * 1.0, 2), "type": "QM R2", "desc": "Resistance 1.0 ATR"})
     levels.append({"level": round(price - atr * 1.0, 2), "type": "QM S2", "desc": "Support 1.0 ATR"})
     levels.append({"level": round(price + atr * 1.5, 2), "type": "QM R3", "desc": "Resistance 1.5 ATR"})
     levels.append({"level": round(price - atr * 1.5, 2), "type": "QM S3", "desc": "Support 1.5 ATR"})
-    
-    # VWAP level
     levels.append({"level": round(vwap, 2), "type": "QM VWAP", "desc": "Volume Weighted Average Price"})
     
     return levels
@@ -405,25 +382,20 @@ def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premiu
     elif cisd == "BEARISH_CISD":
         desc += "**CISD Bearish terdeteksi** (potensi pembalikan ke bawah). "
     
-    # Pivot
     if pivot_data:
         pivot, r1, r2, r3, s1, s2, s3 = pivot_data
         desc += f"Pivot: {pivot:.2f} | R1:{r1:.2f} R2:{r2:.2f} R3:{r3:.2f} | S1:{s1:.2f} S2:{s2:.2f} S3:{s3:.2f}. "
     
-    # EQH/EQL
     if eqh:
         desc += f"EQH terdeteksi di {', '.join([str(e) for e in eqh[:3]])}. "
     if eql:
         desc += f"EQL terdeteksi di {', '.join([str(e) for e in eql[:3]])}. "
     
-    # Premium/Discount
     desc += f"Status: {premium_status}. "
     
-    # Pattern
     if patterns:
         desc += f"Pattern: {', '.join(patterns[:2])}. "
     
-    # QM Level terdekat
     if qm_levels:
         nearest_qm = min(qm_levels, key=lambda x: abs(x["level"] - price))
         desc += f"QM terdekat: {nearest_qm['type']} @ {nearest_qm['level']:.2f}. "
@@ -436,11 +408,11 @@ def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premiu
 def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
-        return None, None, None, None, None, None, None, None, None, None, "Data tidak lengkap."
+        return None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data tidak lengkap."
 
     daily_df = dfs.get("1d")
     if daily_df is None or daily_df.empty or len(daily_df) < 10:
-        return None, None, None, None, None, None, None, None, None, None, "Data daily tidak cukup."
+        return None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data daily tidak cukup."
     
     sh_d, sl_d = find_swings(daily_df, 2)
     bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
@@ -474,7 +446,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     if zone_df is None or zone_df.empty:
         zone_df = dfs.get("1h")
     if zone_df is None or zone_df.empty or len(zone_df) < 10:
-        return None, None, None, None, None, None, None, None, None, None, f"Data zona ({zone_tf}) tidak cukup."
+        return None, None, None, None, None, None, None, None, None, None, None, None, None, None, f"Data zona ({zone_tf}) tidak cukup."
 
     entry_df = dfs.get(entry_tf)
     if entry_df is None or entry_df.empty:
@@ -483,6 +455,9 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     atr = float((entry_df["High"] - entry_df["Low"]).rolling(14).mean().iloc[-1])
     if pd.isna(atr) or atr <= 0:
         atr = price * 0.001
+
+    # === CISD untuk risk label (DIDEFINISIKAN SEBELUM DIPAKAI) ===
+    cisd = detect_cisd(entry_df)
 
     # === PREMIUM/DISCOUNT ===
     premium_pct, premium_status, equilibrium = calculate_premium_discount(price, range_high, range_low)
@@ -599,7 +574,6 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     sell_score, buy_score = 50, 50
     if bias == "SELL": sell_score += 20
     elif bias == "BUY": buy_score += 20
-    cisd = detect_cisd(entry_df)
     if cisd == "BEARISH_CISD": sell_score += 15
     elif cisd == "BULLISH_CISD": buy_score += 15
     if orders["sell_limit"] is not None: sell_score += 15
@@ -608,8 +582,12 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
     if nearest_highs and (nearest_highs[0] - price) < atr * 2: buy_score += 10
 
     total = sell_score + buy_score
-    sell_pct = round((sell_score / total) * 100)
-    buy_pct = 100 - sell_pct
+    if total == 0:
+        sell_pct = 50
+        buy_pct = 50
+    else:
+        sell_pct = round((sell_score / total) * 100)
+        buy_pct = 100 - sell_pct
 
     if sell_pct >= 65:
         rec_direction = "SELL"; rec_label = "RECOMMENDED" if sell_pct >= 75 else "HIGH RISK"
@@ -620,7 +598,11 @@ def generate_all_signals(symbol="XAUUSD", mode="Intraday"):
 
     confidence = {"sell": sell_pct, "buy": buy_pct, "direction": rec_direction, "label": rec_label}
 
-    return orders, bsl, ssl, bias, nearest_highs, nearest_lows, confidence, pivot_data, eqh, eql, premium_status, patterns, qm_levels, equilibrium, premium_pct
+    return (
+        orders, bsl, ssl, bias, nearest_highs, nearest_lows, confidence,
+        pivot_data, eqh, eql, premium_status, patterns, qm_levels,
+        equilibrium, premium_pct
+    )
 
 # ==================== SESSION STATE ====================
 if "logged_in" not in st.session_state:
@@ -811,7 +793,11 @@ else:
         ohlc = {"Open": 0, "High": 0, "Low": 0, "Close": 0}; bias = "NEUTRAL"; bias_color = "bias-neutral"
 
     # --- GENERATE SIGNAL ---
-    orders, bsl, ssl, bias, near_highs, near_lows, conf, pivot_data, eqh, eql, premium_status, patterns, qm_levels, equilibrium, premium_pct = generate_all_signals("XAUUSD", mode=st.session_state.mode)
+    (
+        orders, bsl, ssl, bias, near_highs, near_lows, conf,
+        pivot_data, eqh, eql, premium_status, patterns, qm_levels,
+        equilibrium, premium_pct
+    ) = generate_all_signals("XAUUSD", mode=st.session_state.mode)
 
     # Harga spot
     try:
@@ -834,7 +820,7 @@ else:
             <div class='ohlc-box'><span class='ohlc-label'>Close</span><br><span class='ohlc-value'>{ohlc['Close']}</span></div>
         </div>""", unsafe_allow_html=True)
 
-    # --- TEKNIKAL GRID (Pivot, EQH/EQL, Premium, Pattern, QM) ---
+    # --- TEKNIKAL GRID ---
     pivot, r1, r2, r3, s1, s2, s3 = pivot_data if pivot_data else (0,0,0,0,0,0,0)
     eqh_str = ", ".join([str(e) for e in eqh[:3]]) if eqh else "-"
     eql_str = ", ".join([str(e) for e in eql[:3]]) if eql else "-"
@@ -842,25 +828,18 @@ else:
     qm_str = min(qm_levels, key=lambda x: abs(x["level"] - spot)) if qm_levels else None
     qm_display = f"{qm_str['type']} @ {qm_str['level']}" if qm_str else "-"
 
-    st.markdown("""
+    st.markdown(f"""
     <div class='tech-grid'>
-        <div class='tech-item'><span class='label'>Pivot</span><br><span class='value'>{}</span></div>
-        <div class='tech-item'><span class='label'>R1/R2/R3</span><br><span class='value'>{}/{}/{}</span></div>
-        <div class='tech-item'><span class='label'>S1/S2/S3</span><br><span class='value'>{}/{}/{}</span></div>
-        <div class='tech-item'><span class='label'>EQH / EQL</span><br><span class='value'>{}/<br>{}</span></div>
-        <div class='tech-item'><span class='label'>Premium/Discount</span><br><span class='value' style='color:#ffaa00;'>{}</span></div>
-        <div class='tech-item'><span class='label'>Equilibrium</span><br><span class='value'>{}</span></div>
-        <div class='tech-item'><span class='label'>Chart Pattern</span><br><span class='value' style='color:#00ff88;'>{}</span></div>
-        <div class='tech-item'><span class='label'>QM Level</span><br><span class='value' style='color:#66ccff;'>{}</span></div>
+        <div class='tech-item'><span class='label'>Pivot</span><br><span class='value'>{pivot}</span></div>
+        <div class='tech-item'><span class='label'>R1/R2/R3</span><br><span class='value'>{r1}/{r2}/{r3}</span></div>
+        <div class='tech-item'><span class='label'>S1/S2/S3</span><br><span class='value'>{s1}/{s2}/{s3}</span></div>
+        <div class='tech-item'><span class='label'>EQH / EQL</span><br><span class='value'>{eqh_str}<br>{eql_str}</span></div>
+        <div class='tech-item'><span class='label'>Premium/Discount</span><br><span class='value' style='color:#ffaa00;'>{premium_status} ({premium_pct}%)</span></div>
+        <div class='tech-item'><span class='label'>Equilibrium</span><br><span class='value'>{equilibrium}</span></div>
+        <div class='tech-item'><span class='label'>Chart Pattern</span><br><span class='value' style='color:#00ff88;'>{pattern_str}</span></div>
+        <div class='tech-item'><span class='label'>QM Level</span><br><span class='value' style='color:#66ccff;'>{qm_display}</span></div>
     </div>
-    """.format(
-        pivot, r1, r2, r3, s1, s2, s3,
-        eqh_str, eql_str,
-        f"{premium_status} ({premium_pct}%)",
-        equilibrium,
-        pattern_str,
-        qm_display
-    ), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
     # --- DESKRIPSI ---
     daily_desc = get_daily_bias_description(daily_df, spot, bsl, ssl, eqh, eql, pivot_data, premium_status, patterns, qm_levels)
@@ -955,7 +934,6 @@ else:
         if any(o["entry"] == order["entry"] and o["status"] == "running" for o in st.session_state.triggered_orders):
             status = "✅ RUNNING"
         
-        # Risk badge
         risk_badge = ""
         if "SAFE" in order.get("risk_label", ""):
             risk_badge = "<span class='risk-safe'>✅ SAFE</span>"
