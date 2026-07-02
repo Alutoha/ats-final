@@ -172,11 +172,6 @@ def fetch_all_timeframes(symbol):
     df = fetch_data(symbol, "1m", "7d")
     if df is not None and not df.empty:
         result["1m"] = df
-        df_3m = df.resample('3T').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
-        if not df_3m.empty:
-            result["3m"] = df_3m
     return result
 
 # ==================== TEKNIKAL ====================
@@ -480,10 +475,43 @@ def generate_all_signals(symbol="XAUUSD", mode="M5", exec_mode="Konservatif"):
 
     # ========== Tentukan Timeframe ==========
     if mode == "M3":
-        zone_tf = "3m"
-        entry_tf = "1m"
-        base_sl_mult = 0.5
-        max_dist = 3.0
+        df_1m = dfs.get("1m")
+        if df_1m is not None and not df_1m.empty:
+            try:
+                df_3m = df_1m.resample('3T').agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+                if not df_3m.empty:
+                    dfs["3m"] = df_3m
+                    zone_tf = "3m"
+                    entry_tf = "1m"
+                    base_sl_mult = 0.5
+                    max_dist = 3.0
+                else:
+                    st.warning("⚠️ Gagal membuat data 3m (kosong), fallback ke M5")
+                    mode = "M5"
+                    zone_tf = "5m"
+                    entry_tf = "5m"
+                    base_sl_mult = 0.6
+                    max_dist = 3.0
+            except Exception as e:
+                st.warning(f"⚠️ Error resample 3m: {e}, fallback ke M5")
+                mode = "M5"
+                zone_tf = "5m"
+                entry_tf = "5m"
+                base_sl_mult = 0.6
+                max_dist = 3.0
+        else:
+            st.warning("⚠️ Data 1m tidak tersedia, fallback ke M5")
+            mode = "M5"
+            zone_tf = "5m"
+            entry_tf = "5m"
+            base_sl_mult = 0.6
+            max_dist = 3.0
     elif mode == "M5":
         zone_tf = "5m"
         entry_tf = "5m"
@@ -860,7 +888,6 @@ st.markdown("""
     .confluence-strong-sell { background: #ff444422; border: 1px solid #ff4444; color: #ff4444; }
     .confluence-strong-buy { background: #00ff8822; border: 1px solid #00ff88; color: #00ff88; }
     .confluence-neutral { background: #ffaa0022; border: 1px solid #ffaa00; color: #ffaa00; }
-    .refresh-btn { background: #ffaa00; color: #000; border: none; border-radius: 30px; padding: 8px 20px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
