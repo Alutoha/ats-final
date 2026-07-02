@@ -458,11 +458,11 @@ def get_daily_bias_description(df, price, bsl, ssl, eqh, eql, pivot_data, premiu
 def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservatif"):
     dfs = fetch_all_timeframes(symbol)
     if not dfs:
-        return None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data tidak lengkap."
+        return (None,)*16 + ("Data tidak lengkap.",)
 
     daily_df = dfs.get("1d")
     if daily_df is None or daily_df.empty or len(daily_df) < 10:
-        return None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, "Data daily tidak cukup."
+        return (None,)*16 + ("Data daily tidak cukup.",)
 
     sh_d, sl_d = find_swings(daily_df, 2)
     bull_bias, bear_bias = detect_bos(daily_df, sh_d, sl_d)
@@ -527,7 +527,7 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     if zone_df is None or zone_df.empty:
         zone_df = dfs.get("1h")
     if zone_df is None or zone_df.empty or len(zone_df) < 10:
-        return None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, f"Data zona ({zone_tf}) tidak cukup."
+        return (None,)*16 + (f"Data zona ({zone_tf}) tidak cukup.",)
 
     entry_df = dfs.get(entry_tf)
     if entry_df is None or entry_df.empty:
@@ -543,7 +543,6 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
     if "1h" in dfs and "15m" in dfs:
         df_h1 = dfs["1h"]
         df_m15 = dfs["15m"]
-        # Deteksi BOS di H1 dan M15
         sh_h1, sl_h1 = find_swings(df_h1, 2)
         bull_h1, bear_h1 = detect_bos(df_h1, sh_h1, sl_h1)
         sh_m15, sl_m15 = find_swings(df_m15, 2)
@@ -723,6 +722,16 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
         if choch_type:
             status += f" | {choch_msg}"
 
+        # ---------- VALIDATION CHECKS (untuk checklist) ----------
+        validation_checks = [
+            {"label": "Wick", "passed": wick_ok, "detail": wick_msg},
+            {"label": "Speed", "passed": speed_ok, "detail": speed_msg},
+            {"label": "Bias", "passed": bias_ok, "detail": bias_msg},
+            {"label": "Induce", "passed": not induce_ok, "detail": induce_msg},
+            {"label": "Breaker", "passed": not breaker_ok, "detail": breaker_msg},
+            {"label": "BOS", "passed": bos_ok, "detail": bos_msg if bos_msg else "N/A"},
+        ]
+
         extra_msgs = [
             f"📊 VOL: {vol_status} ({vol_detail})",
             f"📈 ADX: {adx_val} ({adx_status})",
@@ -735,17 +744,22 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
             if zone["low"] <= poc_price <= zone["high"]:
                 extra_msgs.append("🔥 PoC CONFLUENCE!")
 
-        return status, risk, [wick_msg, speed_msg, bias_msg, induce_msg, breaker_msg] + extra_msgs
+        return status, risk, extra_msgs, validation_checks
 
-    def build_order(order_type, direction, entry, sl, tp1, tp2, tp3, reason, zone_info="", validation_status="", risk_label="SAFE", filter_msgs=None):
+    def build_order(order_type, direction, entry, sl, tp1, tp2, tp3, reason, zone_low, zone_high,
+                    zone_info="", validation_status="", risk_label="SAFE", filter_msgs=None,
+                    validation_checks=None):
         return {
             "type": order_type, "direction": direction,
             "entry": round(entry, 2), "sl": round(sl, 2),
             "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2),
-            "reason": reason, "zone_info": zone_info,
+            "reason": reason,
+            "zone_low": zone_low, "zone_high": zone_high,   # range zona (untuk display)
+            "zone_info": zone_info,
             "validation_status": validation_status,
             "risk_label": risk_label,
-            "filter_msgs": filter_msgs if filter_msgs else []
+            "filter_msgs": filter_msgs if filter_msgs else [],
+            "validation_checks": validation_checks if validation_checks else []
         }
 
     def calc_tp_rr(entry, sl, direction):
@@ -768,11 +782,13 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
             if entry > price:
                 sl = zone["high"] + (atr * sl_mult)
                 tp1, tp2, tp3 = calc_tp_rr(entry, sl, "SELL")
-                val_status, risk_label, filter_msgs = run_all_filters(zone, "SELL")
+                val_status, risk_label, filter_msgs, validation_checks = run_all_filters(zone, "SELL")
                 order = build_order("LIMIT", "SELL", entry, sl, tp1, tp2, tp3,
                     f"Sell Limit di Supply OB {zone['low']:.2f}-{zone['high']:.2f}",
-                    f"OB: {zone['low']:.2f}-{zone['high']:.2f}",
-                    val_status, risk_label, filter_msgs)
+                    zone_low=zone["low"], zone_high=zone["high"],
+                    zone_info=f"OB: {zone['low']:.2f}-{zone['high']:.2f}",
+                    validation_status=val_status, risk_label=risk_label,
+                    filter_msgs=filter_msgs, validation_checks=validation_checks)
                 orders["sell"].append(order)
                 if best_supply is None or zone["high"] < best_supply["high"]:
                     best_supply = zone
@@ -784,11 +800,13 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
             if entry < price:
                 sl = zone["low"] - (atr * sl_mult)
                 tp1, tp2, tp3 = calc_tp_rr(entry, sl, "BUY")
-                val_status, risk_label, filter_msgs = run_all_filters(zone, "BUY")
+                val_status, risk_label, filter_msgs, validation_checks = run_all_filters(zone, "BUY")
                 order = build_order("LIMIT", "BUY", entry, sl, tp1, tp2, tp3,
                     f"Buy Limit di Demand OB {zone['low']:.2f}-{zone['high']:.2f}",
-                    f"OB: {zone['low']:.2f}-{zone['high']:.2f}",
-                    val_status, risk_label, filter_msgs)
+                    zone_low=zone["low"], zone_high=zone["high"],
+                    zone_info=f"OB: {zone['low']:.2f}-{zone['high']:.2f}",
+                    validation_status=val_status, risk_label=risk_label,
+                    filter_msgs=filter_msgs, validation_checks=validation_checks)
                 orders["buy"].append(order)
                 if best_demand is None or zone["low"] > best_demand["low"]:
                     best_demand = zone
@@ -809,7 +827,6 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
         if nearest_lows and (price - nearest_lows[0]) < atr * 2: sell_score += 10
         if nearest_highs and (nearest_highs[0] - price) < atr * 2: buy_score += 10
 
-        # Tambahkan bias minor
         if minor_bias == "BUY":
             buy_score += 25
         elif minor_bias == "SELL":
@@ -846,7 +863,10 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
             ]
             orders["sell"].append(build_order("MARKET", "SELL", entry, sl, tp1, tp2, tp3,
                 f"Sell Now (Market) di {price}",
-                f"Spot: {price}", val_status, risk_label, filter_msgs))
+                zone_low=entry, zone_high=entry,   # market: zona = entry
+                zone_info=f"Spot: {price}",
+                validation_status=val_status, risk_label=risk_label,
+                filter_msgs=filter_msgs, validation_checks=[]))
         elif best_direction == "BUY":
             entry = price
             sl = price - (atr * 0.6)
@@ -863,7 +883,10 @@ def generate_all_signals(symbol="XAUUSD", mode="Scalping", exec_mode="Konservati
             ]
             orders["buy"].append(build_order("MARKET", "BUY", entry, sl, tp1, tp2, tp3,
                 f"Buy Now (Market) di {price}",
-                f"Spot: {price}", val_status, risk_label, filter_msgs))
+                zone_low=entry, zone_high=entry,
+                zone_info=f"Spot: {price}",
+                validation_status=val_status, risk_label=risk_label,
+                filter_msgs=filter_msgs, validation_checks=[]))
 
     # === Confidence & Confluence ===
     sell_score, buy_score = 50, 50
@@ -970,6 +993,14 @@ st.markdown("""
     .confluence-strong-buy { background: #00ff8822; border: 1px solid #00ff88; color: #00ff88; }
     .confluence-neutral { background: #ffaa0022; border: 1px solid #ffaa00; color: #ffaa00; }
     .no-zone { color: #ffaa00; font-weight: bold; font-size: 1.1rem; text-align: center; padding: 20px; }
+    .checklist { list-style: none; padding: 0; margin: 10px 0; }
+    .checklist li { margin-bottom: 4px; font-size: 0.85rem; }
+    .pass { color: #00ff88; }
+    .fail { color: #ff4444; }
+    .zone-range { font-size: 1.3rem; font-weight: bold; background: rgba(0,0,0,0.3); padding: 5px 15px; border-radius: 30px; display: inline-block; margin-bottom: 10px; }
+    .zone-strength { font-size: 0.9rem; margin-top: 8px; }
+    .strong-zone { color: #00ff88; font-weight: bold; }
+    .weak-zone { color: #ffaa00; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1312,10 +1343,39 @@ else:
             risk_badge = "<span class='risk-high'>⚠️ HIGH RISK</span>"
         else:
             risk_badge = "<span class='risk-wait'>⏳ Need Confirmation</span>"
-        
+
+        # Tampilkan zona range (untuk LIMIT) atau entry spot (untuk MARKET)
+        if order["type"] == "LIMIT":
+            zone_display = f"<div class='zone-range'>Zona Entry: {order['zone_low']} - {order['zone_high']}</div>"
+        else:
+            zone_display = f"<div class='zone-range'>Market Entry: {order['entry']}</div>"
+
+        # Checklist validasi
+        checks = order.get("validation_checks", [])
+        if checks:
+            check_items = "".join([
+                f"<li>{'✅' if c['passed'] else '❌'} {c['label']}: {c['detail']}</li>"
+                for c in checks
+            ])
+            passed_count = sum(1 for c in checks if c['passed'])
+            total_checks = len(checks)
+            if passed_count == total_checks:
+                strength_class = "strong-zone"
+                strength_text = "🟢 Strong Zone (semua filter lulus)"
+            else:
+                strength_class = "weak-zone"
+                strength_text = f"🟡 Weak Zone ({passed_count}/{total_checks} filter lulus)"
+            checklist_html = f"""
+            <ul class='checklist'>{check_items}</ul>
+            <div class='zone-strength {strength_class}'>{strength_text}</div>
+            """
+        else:
+            checklist_html = ""
+
+        # Info tambahan (volume, adx, dll)
         filter_msgs = order.get("filter_msgs", [])
-        filter_html = "<br>".join([f"<span style='font-size:0.7rem;color:#aaa;'>• {msg}</span>" for msg in filter_msgs[:6]])
-        
+        info_html = "<br>".join([f"<small style='color:#aaa;'>• {msg}</small>" for msg in filter_msgs[:6]])
+
         return f"""
         <div class='{card_class}'>
             <div class='signal-header'>
@@ -1325,18 +1385,20 @@ else:
                     {risk_badge} {status}
                 </div>
             </div>
+            {zone_display}
             <div style='display:flex; justify-content:space-between;'>
-                <span><b>Entry</b> <span style='font-family:monospace;'>{order['entry']}</span></span>
                 <span><b>SL</b> <span style='color:#ff6666;'>{order['sl']}</span></span>
+                <span><b>TP</b> <span style='color:#66ff88;'>1:{order['tp1']} 2:{order['tp2']} 3:{order['tp3']}</span></span>
             </div>
             <div class='chip-container'>
                 <span class='chip chip-tp1'>🏆 TP1 (1:1.2) {order['tp1']}</span>
                 <span class='chip chip-tp'>🏆 TP2 (1:2) {order['tp2']}</span>
                 <span class='chip chip-tp'>🏆 TP3 (1:4) {order['tp3']}</span>
             </div>
+            {checklist_html}
             <div class='zone-footer'>
                 <small>{order['reason']}</small><br>
-                {filter_html}
+                {info_html}
             </div>
         </div>
         """
@@ -1395,7 +1457,29 @@ else:
                 elif o.get("risk_label") == "HIGH RISK": risk_badge = "<span class='risk-high'>⚠️ HIGH RISK</span>"
                 else: risk_badge = "<span class='risk-wait'>⏳ Need Confirmation</span>"
                 filter_msgs = o.get("filter_msgs", [])
-                filter_html = "<br>".join([f"<span style='font-size:0.7rem;color:#aaa;'>• {msg}</span>" for msg in filter_msgs[:6]])
+                info_html = "<br>".join([f"<small style='color:#aaa;'>• {msg}</small>" for msg in filter_msgs[:6]])
+                # zone display
+                if o["type"] == "LIMIT":
+                    zone_display = f"<div class='zone-range'>Zona Entry: {o['zone_low']} - {o['zone_high']}</div>"
+                else:
+                    zone_display = f"<div class='zone-range'>Market Entry: {o['entry']}</div>"
+                checks = o.get("validation_checks", [])
+                if checks:
+                    check_items = "".join([
+                        f"<li>{'✅' if c['passed'] else '❌'} {c['label']}: {c['detail']}</li>"
+                        for c in checks
+                    ])
+                    passed_count = sum(1 for c in checks if c['passed'])
+                    total_checks = len(checks)
+                    if passed_count == total_checks:
+                        strength_class = "strong-zone"
+                        strength_text = "🟢 Strong Zone"
+                    else:
+                        strength_class = "weak-zone"
+                        strength_text = f"🟡 Weak Zone ({passed_count}/{total_checks})"
+                    checklist_html = f"<ul class='checklist'>{check_items}</ul><div class='zone-strength {strength_class}'>{strength_text}</div>"
+                else:
+                    checklist_html = ""
                 st.markdown(f"""
                 <div style='background:#1a1a2e; border:2px solid {border}; border-radius:20px; padding:15px; margin:10px 0;'>
                     <div style='display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap;'>
@@ -1405,16 +1489,17 @@ else:
                             {risk_badge}
                         </div>
                     </div>
+                    {zone_display}
                     <div class='order-grid'>
-                        <div><span class='label'>Entry</span><br><b>{o['entry']}</b></div>
                         <div><span class='label'>SL</span><br><b style='color:#ff4444;'>{o['sl']}</b></div>
-                        <div><span class='label'>TP1 (1:1.2)</span><br><b>{o['tp1']}</b></div>
-                        <div><span class='label'>TP2 (1:2)</span><br><b>{o['tp2']}</b></div>
-                        <div><span class='label'>TP3 (1:4)</span><br><b>{o['tp3']}</b></div>
+                        <div><span class='label'>TP1</span><br><b>{o['tp1']}</b></div>
+                        <div><span class='label'>TP2</span><br><b>{o['tp2']}</b></div>
+                        <div><span class='label'>TP3</span><br><b>{o['tp3']}</b></div>
                     </div>
+                    {checklist_html}
                     <div class='zone-footer'>
                         <small>{o['reason']}</small><br>
-                        {filter_html}
+                        {info_html}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
